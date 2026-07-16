@@ -98,7 +98,16 @@ class MotionConfig:
     motion_dir: str = ""
     """Directory (or comma-separated directories) of .npz motion files.
     When non-empty, takes precedence over motion_file."""
+# 随机采样motion文件
+    motion_sample_count: int = 0
+    """motion_dir 模式下随机采样的 npz 数量；>0 启用子集加载，0 表示加载目录下全部文件。"""
 
+    motion_sample_seed: int | None = None
+    """随机采样的随机种子；为 None 时使用实验配置中的 training.seed。"""
+
+    motion_sample_manifest: str = ""
+    """选中动作文件清单的输出路径；为空时写入 <experiment_dir>/motion_subset_manifest.txt。"""
+####
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""

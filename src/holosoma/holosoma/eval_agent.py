@@ -83,6 +83,12 @@ def run_eval_with_tyro(
         max_eval_steps=tyro_config.training.max_eval_steps,
     )
 
+    # Flush any in-progress episode video before Isaac Sim shuts down.
+    # evaluate_policy may run many steps without env reset; frames stay buffered until
+    # on_episode_end or cleanup() calls stop_recording().
+    if hasattr(env, "simulator") and getattr(env.simulator, "video_recorder", None) is not None:
+        env.simulator.video_recorder.cleanup()
+
     # Cleanup simulation app
     if simulation_app:
         close_simulation_app(simulation_app)

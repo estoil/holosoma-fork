@@ -1014,20 +1014,39 @@ class FastSACAgent(BaseAlgo):
 
         obs = self.env.reset()
 
-        for step in itertools.islice(itertools.count(), max_eval_steps):
-            if self.obs_normalization:
-                normalized_obs = self.obs_normalizer(obs, update=False)
-            else:
-                normalized_obs = obs
-            # Actions are already scaled by the actor
-            actions = self.actor(normalized_obs)[0]
+        # 有 max_eval_steps 时显示 play/录制进度；无限 eval 时只写 motion 切换日志。
+        progress_bar = tqdm.tqdm(total=max_eval_steps, desc="Play/eval", unit="step") if max_eval_steps else None
+        last_motion_key = None
+        eval_video_recording = self._start_eval_video_recording()
+        try:
+            for step in itertools.islice(itertools.count(), max_eval_steps):
+                if self.obs_normalization:
+                    normalized_obs = self.obs_normalizer(obs, update=False)
+                else:
+                    normalized_obs = obs
+                # Actions are already scaled by the actor
+                actions = self.actor(normalized_obs)[0]
 
-            actor_state = {"step": step, "actions": actions, "obs": obs}
-            actor_state = self._pre_eval_env_step(actor_state)
+                actor_state = {"step": step, "actions": actions, "obs": obs}
+                actor_state = self._pre_eval_env_step(actor_state)
 
-            obs, _, _, _ = self.env.step(actor_state["actions"])
-            actor_state["obs"] = obs
-            actor_state = self._post_eval_env_step(actor_state)
+                obs, _, _, _ = self.env.step(actor_state["actions"])
+                actor_state["obs"] = obs
+                actor_state = self._post_eval_env_step(actor_state)
+
+                status = self._get_eval_motion_status()
+                last_motion_key = self._log_eval_motion_status_if_changed(status, step, last_motion_key)
+                if progress_bar is not None:
+                    if status is not None:
+                        progress_bar.set_postfix(
+                            motion=status["motion_name"],
+                            t=f"{status['local_timestep']}/{status['motion_length']}",
+                        )
+                    progress_bar.update(1)
+        finally:
+            self._stop_eval_video_recording(eval_video_recording)
+            if progress_bar is not None:
+                progress_bar.close()
 
         self._post_evaluate_policy()
 

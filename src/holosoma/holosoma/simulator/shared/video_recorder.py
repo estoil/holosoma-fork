@@ -75,6 +75,7 @@ class VideoRecorderInterface(ABC):
         self.config = config
         self.simulator = simulator
         self._is_recording = False
+        self._manual_recording = False
         self._current_episode = 0
         self._total_episodes = 0
 
@@ -170,6 +171,25 @@ class VideoRecorderInterface(ABC):
         # Set recording state - this method now owns the recording flag
         self._is_recording = True
         self._start_recording(episode_id)
+
+    def discard_recording(self) -> None:
+        """丢弃当前录制缓冲，不编码、不写文件。"""
+        self._is_recording = False
+        self._clear_frame_buffer()
+        self._frame_times.clear()
+
+    def start_manual_recording(self, episode_id: int = 0) -> None:
+        """手动开启一段连续录像，期间忽略 episode reset 触发的自动开停。"""
+        if self._is_recording:
+            self.discard_recording()
+        self._manual_recording = True
+        self._current_episode = episode_id
+        self.start_recording(episode_id)
+
+    def stop_manual_recording(self) -> None:
+        """结束手动连续录像，并把当前缓冲写成视频文件。"""
+        self._manual_recording = False
+        self.stop_recording()
 
     def capture_frame(self, env_id: int = 0) -> None:
         """Shared frame capture dispatch logic.
@@ -332,6 +352,9 @@ class VideoRecorderInterface(ABC):
         env_id : int
             The environment ID where the episode is starting.
         """
+        if self._manual_recording:
+            return
+
         # Only record from the specified environment
         if env_id != self.config.record_env_id:
             return
@@ -349,6 +372,9 @@ class VideoRecorderInterface(ABC):
         This method is called when an episode ends and stops recording
         if it was active for the current episode.
         """
+        if self._manual_recording:
+            return
+
         # Only stop for the specified environment
         if env_id != self.config.record_env_id:
             return

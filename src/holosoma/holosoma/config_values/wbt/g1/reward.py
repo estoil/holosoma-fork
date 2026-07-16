@@ -37,6 +37,19 @@ g1_29dof_wbt_reward = RewardManagerCfg(
             params={"sigma": 3.14},
             weight=1.0,
         ),
+        # 新增设计ZMP
+        "zmp_support_region_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ZMPSupportRegionReward",
+            params={
+                "contact_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+                "sigma": 0.05,
+                "support_margin": 0.04,
+                "vertical_force_threshold": 1.0,
+                "debug_log_interval": 200,
+            },
+            # ZMP 需要读取真实承力 body 的 contact force；G1 上 foot_contact_point 是辅助点，默认使用 ankle roll link。
+            weight=0.5,
+        ),
         # Regularization rewards
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",

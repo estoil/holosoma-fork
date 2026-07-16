@@ -37,3 +37,15 @@ __pycache__
 .logs/
 holosoma_config.yaml
 wandb-metadata.json
+
+# Local motion / experiment data (do not publish by default)
+motions_from_web/
+src/holosoma/holosoma/data/motions/**/gmr_nokov/
+*.npz
+*.pkl
+*.pt
+*.pth
+*.ckpt
+# Extra local artifacts
+.cursor/
+*.mp4

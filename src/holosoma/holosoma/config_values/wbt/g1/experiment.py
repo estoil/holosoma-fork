@@ -28,7 +28,7 @@ g1_29dof_wbt = ExperimentConfig(
             algo.ppo.config,
             num_learning_iterations=30000,
             num_learning_epochs=5,
-            save_interval=4000,
+            save_interval=5000,
             entropy_coef=0.005,
             init_noise_std=1.0,
             actor_learning_rate=1e-3,

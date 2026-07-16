@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import random
 import re
 from pathlib import Path
 from typing import Any, List
@@ -40,9 +42,13 @@ class MotionLoader:
     ):
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
+        self.motion_file = motion_file
+        self.loaded_motion_files = [motion_file]
 
         logger.info(f"Loading motion file: {motion_file}")
         body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_npz(motion_file, device)
+        self.body_names_in_motion_data = body_names_in_motion_data
+        self.joint_names_in_motion_data = joint_names_in_motion_data
         body_indexes = self._get_index_of_a_in_b(robot_body_names, body_names_in_motion_data, device)
         joint_indexes = self._get_index_of_a_in_b(robot_joint_names, joint_names_in_motion_data, device)
 
@@ -230,6 +236,103 @@ class MotionLoader:
         return self
 
 
+def collect_motion_npz_files(motion_dir: str) -> list[str]:
+    """从 motion 目录（可逗号分隔多个）收集并排序全部 .npz 路径。"""
+    dirs = [d.strip() for d in motion_dir.split(",") if d.strip()]
+    motion_files: list[str] = []
+    for d in dirs:
+        expanded = os.path.expanduser(d)
+        files = sorted(str(p) for p in Path(expanded).glob("*.npz"))
+        logger.info(f"collect_motion_npz_files: found {len(files)} .npz files in {expanded}")
+        motion_files.extend(files)
+    return motion_files
+
+
+def select_random_motion_subset(all_files: list[str], sample_count: int, seed: int) -> list[str]:
+    """按给定 seed 可复现地随机抽取子集；结果排序以便日志/manifest 稳定。"""
+    if sample_count <= 0 or sample_count >= len(all_files):
+        return list(all_files)
+    rng = random.Random(seed)
+    return sorted(rng.sample(all_files, sample_count))
+
+
+def build_motion_subset_cache_path(motion_dir: str, selected_files: list[str], sample_count: int, seed: int) -> Path | None:
+    """为随机子集生成稳定缓存路径；数据文件变动时 hash 会变化。"""
+    dirs = [d.strip() for d in motion_dir.split(",") if d.strip()]
+    if not dirs:
+        return None
+
+    hash_input = []
+    for path_str in selected_files:
+        path = Path(path_str)
+        stat = path.stat()
+        hash_input.append(f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}")
+
+    digest = hashlib.sha1("\n".join(hash_input).encode("utf-8")).hexdigest()[:12]
+    cache_dir = Path(os.path.expanduser(dirs[0])) / ".holosoma_cache"
+    return cache_dir / f"motion_subset_count{sample_count}_seed{seed}_{digest}.pt"
+
+
+def log_motion_subset_selection(
+    *,
+    motion_dir: str,
+    all_files: list[str],
+    selected_files: list[str],
+    sample_count: int,
+    seed: int,
+    manifest_path: str | None,
+) -> Path | None:
+    """记录并持久化本次训练选中的动作文件列表（终端日志 + manifest 文件）。"""
+    assert len(all_files) > 0, f"No .npz files found in {motion_dir}"
+    assert len(selected_files) > 0, "Motion subset selection produced an empty file list"
+
+    preview_n = 5
+    selected_preview = selected_files[:preview_n]
+    logger.info(
+        "RandomSubsetMultiMotionLoader: motion_dir={} total_available={} sample_count={} seed={} selected={}",
+        motion_dir,
+        len(all_files),
+        sample_count,
+        seed,
+        len(selected_files),
+    )
+    logger.info(
+        "RandomSubsetMultiMotionLoader: first {} selected files: {}",
+        min(preview_n, len(selected_files)),
+        selected_preview,
+    )
+    if len(selected_files) > preview_n:
+        logger.info(
+            "RandomSubsetMultiMotionLoader: last {} selected files: {}",
+            preview_n,
+            selected_files[-preview_n:],
+        )
+
+    if manifest_path is None:
+        return None
+
+    manifest = Path(manifest_path)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    selected_set = set(selected_files)
+    lines = [
+        "# Holosoma 动作子集清单",
+        f"motion_dir: {motion_dir}",
+        f"total_available: {len(all_files)}",
+        f"sample_count_requested: {sample_count}",
+        f"sample_seed: {seed}",
+        f"selected_count: {len(selected_files)}",
+        "",
+        "[selected]",
+        *selected_files,
+        "",
+        "[not_selected]",
+        *[path for path in all_files if path not in selected_set],
+    ]
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("RandomSubsetMultiMotionLoader: wrote motion subset manifest to {}", manifest)
+    return manifest
+
+
 class MultiMotionLoader:
     """Loads multiple NPZ motion files from a directory and concatenates them at runtime.
 
@@ -243,24 +346,26 @@ class MultiMotionLoader:
         robot_body_names: list[str],
         robot_joint_names: list[str],
         device: str = "cpu",
+        motion_files: list[str] | None = None,  # 非空时直接加载给定列表，跳过目录扫描
+        cache_path: str | Path | None = None,  # 非空时优先读取/写入合并后的 motion 缓存
     ):
-        # Support comma-separated directories for combining multiple datasets
-        dirs = [d.strip() for d in motion_dir.split(",")]
-        motion_files = []
-        for d in dirs:
-            expanded = os.path.expanduser(d)
-            files = sorted(str(p) for p in Path(expanded).glob("*.npz"))
-            logger.info(f"MultiMotionLoader: found {len(files)} .npz files in {expanded}")
-            motion_files.extend(files)
+        if motion_files is None:
+            motion_files = collect_motion_npz_files(motion_dir)
         assert len(motion_files) > 0, f"No .npz files found in {motion_dir}"
-        logger.info(f"MultiMotionLoader: loading {len(motion_files)} total motion files")
+        self.motion_files = list(motion_files)
+        logger.info(f"MultiMotionLoader: loading {len(self.motion_files)} total motion files")
+
+        if cache_path is not None and self._try_load_cache(cache_path, robot_body_names, robot_joint_names, device):
+            return
 
         loaders = []
+        loaded_motion_files: list[str] = []
         skipped = 0
-        for mf in motion_files:
+        for mf in self.motion_files:
             try:
                 loader = MotionLoader(mf, robot_body_names, robot_joint_names, device=device)
                 loaders.append(loader)
+                loaded_motion_files.append(mf)
             except (KeyError, AssertionError, ValueError) as e:  # noqa: PERF203
                 # Skip files with incompatible format (e.g., missing body_names, wrong body count)
                 skipped += 1
@@ -269,6 +374,7 @@ class MultiMotionLoader:
         if skipped > 3:
             logger.warning(f"MultiMotionLoader: skipped {skipped} files total due to format issues")
         assert len(loaders) > 0, f"No compatible motion files found (skipped {skipped})"
+        self.loaded_motion_files = loaded_motion_files  # 实际成功加载的文件路径
 
         # Track per-motion boundaries
         lengths = [loader.time_step_total for loader in loaders]
@@ -303,6 +409,100 @@ class MultiMotionLoader:
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
 
         logger.info(f"MultiMotionLoader: {self._num_motions} motions, {self.time_step_total} total frames")
+        if cache_path is not None:
+            self._write_cache(cache_path, loaders[0])
+
+    def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
+        indexes = []
+        for name in a_names:
+            assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
+            indexes.append(b_names.index(name))
+        return torch.tensor(indexes, dtype=torch.long, device=device)
+
+    def _try_load_cache(
+        self,
+        cache_path: str | Path,
+        robot_body_names: list[str],
+        robot_joint_names: list[str],
+        device: str,
+    ) -> bool:
+        """尝试读取合并 motion 缓存，失败时回退到逐文件加载。"""
+        cache = Path(cache_path)
+        if not cache.exists():
+            return False
+
+        try:
+            payload = torch.load(cache, map_location=device)
+            if payload.get("cache_version") != 1:
+                logger.warning("MultiMotionLoader: cache version mismatch, rebuilding {}", cache)
+                return False
+
+            body_names = payload["body_names"]
+            joint_names = payload["joint_names"]
+            self.loaded_motion_files = list(payload["loaded_motion_files"])
+            self._joint_indexes = self._get_index_of_a_in_b(robot_joint_names, joint_names, device)
+            self._body_indexes = self._get_index_of_a_in_b(robot_body_names, body_names, device)
+            self._motion_start_idx = payload["motion_start_idx"].to(device=device)
+            self._motion_end_idx = payload["motion_end_idx"].to(device=device)
+            self._num_motions = int(payload["num_motions"])
+            self._joint_pos = payload["joint_pos"].to(device=device)
+            self._joint_vel = payload["joint_vel"].to(device=device)
+            self._body_pos_w = payload["body_pos_w"].to(device=device)
+            self._body_quat_w = payload["body_quat_w"].to(device=device)
+            self._body_lin_vel_w = payload["body_lin_vel_w"].to(device=device)
+            self._body_ang_vel_w = payload["body_ang_vel_w"].to(device=device)
+            self.fps = payload["fps"]
+            self.time_step_total = self._joint_pos.shape[0]
+            self.has_object = bool(payload["has_object"])
+            if self.has_object:
+                self._object_pos_w = payload["object_pos_w"].to(device=device)
+                self._object_quat_w = payload["object_quat_w"].to(device=device)
+                self._object_lin_vel_w = payload["object_lin_vel_w"].to(device=device)
+            else:
+                self._object_pos_w = torch.zeros(0, 3, device=device)
+                self._object_quat_w = torch.zeros(0, 4, device=device)
+                self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+
+            logger.info("MultiMotionLoader: loaded merged motion cache from {}", cache)
+            return True
+        except Exception as exc:
+            logger.warning("MultiMotionLoader: failed to load cache {}, rebuilding. Error: {}", cache, exc)
+            return False
+
+    def _write_cache(self, cache_path: str | Path, first_loader: MotionLoader) -> None:
+        """写入合并后的 motion 缓存，后续相同随机子集可直接加载。"""
+        cache = Path(cache_path)
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cache_version": 1,
+                "loaded_motion_files": self.loaded_motion_files,
+                "body_names": first_loader.body_names_in_motion_data,
+                "joint_names": first_loader.joint_names_in_motion_data,
+                "motion_start_idx": self._motion_start_idx.detach().cpu(),
+                "motion_end_idx": self._motion_end_idx.detach().cpu(),
+                "num_motions": self._num_motions,
+                "joint_pos": self._joint_pos.detach().cpu(),
+                "joint_vel": self._joint_vel.detach().cpu(),
+                "body_pos_w": self._body_pos_w.detach().cpu(),
+                "body_quat_w": self._body_quat_w.detach().cpu(),
+                "body_lin_vel_w": self._body_lin_vel_w.detach().cpu(),
+                "body_ang_vel_w": self._body_ang_vel_w.detach().cpu(),
+                "fps": self.fps,
+                "has_object": self.has_object,
+            }
+            if self.has_object:
+                payload.update(
+                    {
+                        "object_pos_w": self._object_pos_w.detach().cpu(),
+                        "object_quat_w": self._object_quat_w.detach().cpu(),
+                        "object_lin_vel_w": self._object_lin_vel_w.detach().cpu(),
+                    }
+                )
+            torch.save(payload, cache)
+            logger.info("MultiMotionLoader: wrote merged motion cache to {}", cache)
+        except Exception as exc:
+            logger.warning("MultiMotionLoader: failed to write cache {}: {}", cache, exc)
 
     @property
     def num_motions(self) -> int:
@@ -403,6 +603,59 @@ class MultiMotionLoader:
         self.time_step_total = self._joint_pos.shape[0]
         self._num_motions = len(self._motion_start_idx)
         return self
+
+
+class RandomSubsetMultiMotionLoader(MultiMotionLoader):
+    """从 ``motion_dir`` 中可复现地随机抽取若干 npz 再加载。
+
+    适用于大规模动作库（如 AMS 9814 条）中只训练固定数量子集（如 1000 条）的场景。
+    选中的文件会写入日志，并保存到实验目录下的 ``motion_subset_manifest.txt``。
+    """
+
+    def __init__(
+        self,
+        motion_dir: str,
+        robot_body_names: list[str],
+        robot_joint_names: list[str],
+        device: str = "cpu",
+        sample_count: int = 1000,
+        seed: int = 0,
+        manifest_path: str | None = None,
+    ):
+        if sample_count <= 0:
+            raise ValueError(f"motion_sample_count must be > 0, got {sample_count}")
+
+        all_files = collect_motion_npz_files(motion_dir)
+        if sample_count > len(all_files):
+            logger.warning(
+                "RandomSubsetMultiMotionLoader: sample_count={} exceeds available {} files; using all files",
+                sample_count,
+                len(all_files),
+            )
+        selected_files = select_random_motion_subset(all_files, sample_count, seed)
+
+        self.sample_count_requested = sample_count
+        self.sample_seed = seed
+        self.total_available = len(all_files)
+        self.selected_motion_files = selected_files
+        self.cache_path = build_motion_subset_cache_path(motion_dir, selected_files, sample_count, seed)
+        self.manifest_path = log_motion_subset_selection(
+            motion_dir=motion_dir,
+            all_files=all_files,
+            selected_files=selected_files,
+            sample_count=sample_count,
+            seed=seed,
+            manifest_path=manifest_path,
+        )
+
+        super().__init__(
+            motion_dir=motion_dir,
+            robot_body_names=robot_body_names,
+            robot_joint_names=robot_joint_names,
+            device=device,
+            motion_files=selected_files,
+            cache_path=self.cache_path,
+        )
 
 
 class AdaptiveTimestepsSampler:
@@ -521,6 +774,29 @@ class MotionCommand(CommandTermBase):
             self.motion_cfg = MotionConfig(**cfg.params["motion_config"])
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
 
+    def _resolve_motion_sample_seed(self) -> int:
+        """解析动作子集采样的随机种子。"""
+        if self.motion_cfg.motion_sample_seed is not None:
+            return int(self.motion_cfg.motion_sample_seed)
+
+        training_cfg = getattr(self._env.simulator, "training_config", None)
+        if training_cfg is not None and getattr(training_cfg, "seed", None) is not None:
+            return int(training_cfg.seed)
+
+        sim_cfg = getattr(self._env.simulator, "tyro_config", None)
+        if sim_cfg is not None and sim_cfg.training.seed is not None:
+            return int(sim_cfg.training.seed)
+        return 0
+
+    def _resolve_motion_sample_manifest_path(self) -> str | None:
+        """解析动作子集清单 manifest 的输出路径。"""
+        if self.motion_cfg.motion_sample_manifest:
+            return os.path.expanduser(self.motion_cfg.motion_sample_manifest)
+        sim_cfg = getattr(self._env.simulator, "tyro_config", None)
+        if sim_cfg is not None and sim_cfg.experiment_dir:
+            return str(Path(sim_cfg.experiment_dir) / "motion_subset_manifest.txt")
+        return None
+
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
         self.device = self._env.device
@@ -534,14 +810,26 @@ class MotionCommand(CommandTermBase):
         assert self.motion_cfg.motion_file or self.motion_cfg.motion_dir, (
             "Either motion_file or motion_dir must be set in MotionConfig"
         )
-        self.motion: MotionLoader | MultiMotionLoader
+        self.motion: MotionLoader | MultiMotionLoader | RandomSubsetMultiMotionLoader
         if self.motion_cfg.motion_dir:
-            self.motion = MultiMotionLoader(
-                self.motion_cfg.motion_dir,
-                robot_body_names_alias,
-                robot_joint_names,
-                device=self.device,
-            )
+            if self.motion_cfg.motion_sample_count > 0:
+                # 从 motion_dir 随机抽取子集训练，并记录选中文件清单
+                self.motion = RandomSubsetMultiMotionLoader(
+                    self.motion_cfg.motion_dir,
+                    robot_body_names_alias,
+                    robot_joint_names,
+                    device=self.device,
+                    sample_count=self.motion_cfg.motion_sample_count,
+                    seed=self._resolve_motion_sample_seed(),
+                    manifest_path=self._resolve_motion_sample_manifest_path(),
+                )
+            else:
+                self.motion = MultiMotionLoader(
+                    self.motion_cfg.motion_dir,
+                    robot_body_names_alias,
+                    robot_joint_names,
+                    device=self.device,
+                )
         else:
             self.motion = MotionLoader(
                 self.motion_cfg.motion_file,
@@ -636,6 +924,7 @@ class MotionCommand(CommandTermBase):
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         already_last_timestep_mask = self.time_steps[env_ids] >= end_idx - 1
         self.time_steps[env_ids] = torch.where(already_last_timestep_mask, end_idx - 2, self.time_steps[env_ids])
+        self._refresh_motion_cache(env_ids)
 
         # 1. Get the root/body poses from the motion data
         root_pos = self.root_pos_w[env_ids].clone()
@@ -770,6 +1059,8 @@ class MotionCommand(CommandTermBase):
             sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)  # type: ignore[attr-defined]
             sim.refresh_sim_tensors()
 
+        self._refresh_motion_cache()
+
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
         # If I take this motion data and adapt it to where my robot currently is
@@ -832,62 +1123,59 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self.motion.joint_pos[self.time_steps]
+        return self._current_joint_pos
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self.motion.joint_vel[self.time_steps]
+        return self._current_joint_vel
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return (
-            self.motion.body_pos_w[self.time_steps][:, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, :]
-        )
+        return self._current_body_pos_w[:, self.tracked_body_indexes] + self._env.simulator.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._current_body_quat_w[:, self.tracked_body_indexes]
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._current_body_lin_vel_w[:, self.tracked_body_indexes]
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps][:, self.tracked_body_indexes]
+        return self._current_body_ang_vel_w[:, self.tracked_body_indexes]
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.ref_body_index] + self._env.simulator.scene.env_origins
+        return self._current_body_pos_w[:, self.ref_body_index] + self._env.simulator.scene.env_origins
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, self.ref_body_index]
+        return self._current_body_quat_w[:, self.ref_body_index]
 
     @property
     def ref_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps, self.ref_body_index]
+        return self._current_body_lin_vel_w[:, self.ref_body_index]
 
     @property
     def ref_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps, self.ref_body_index]
+        return self._current_body_ang_vel_w[:, self.ref_body_index]
 
     @property
     def root_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, 0] + self._env.simulator.scene.env_origins
+        return self._current_body_pos_w[:, 0] + self._env.simulator.scene.env_origins
 
     @property
     def root_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, 0]
+        return self._current_body_quat_w[:, 0]
 
     @property
     def root_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps, 0]
+        return self._current_body_lin_vel_w[:, 0]
 
     @property
     def root_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps, 0]
+        return self._current_body_ang_vel_w[:, 0]
 
     #########################################################################################
     ## Robot from simulator
@@ -954,15 +1242,15 @@ class MotionCommand(CommandTermBase):
     @property
     def object_pos_w(self) -> torch.Tensor:
         # Applies env origins, but ideally we should rely on the simulator
-        return self.motion.object_pos_w[self.time_steps] + self._env.simulator.scene.env_origins
+        return self._current_object_pos_w + self._env.simulator.scene.env_origins
 
     @property
     def object_quat_w(self) -> torch.Tensor:
-        return self.motion.object_quat_w[self.time_steps]
+        return self._current_object_quat_w
 
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.object_lin_vel_w[self.time_steps]
+        return self._current_object_lin_vel_w
 
     #########################################################################################
     ## Object from simulator
@@ -996,6 +1284,51 @@ class MotionCommand(CommandTermBase):
 
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
+
+        self._init_motion_cache_buffers()
+        self._refresh_motion_cache()
+
+    def _init_motion_cache_buffers(self) -> None:
+        """初始化当前帧 motion 缓存，避免每个 step/reward/obs 重复索引大 motion 张量。"""
+        num_robot_bodies = len(self._env.simulator._body_list)  # type: ignore[attr-defined]
+        num_robot_joints = len(self._env.simulator.dof_names)  # type: ignore[attr-defined]
+
+        self._current_joint_pos = torch.zeros(self.num_envs, num_robot_joints, device=self.device)
+        self._current_joint_vel = torch.zeros_like(self._current_joint_pos)
+        self._current_body_pos_w = torch.zeros(self.num_envs, num_robot_bodies, 3, device=self.device)
+        self._current_body_quat_w = torch.zeros(self.num_envs, num_robot_bodies, 4, device=self.device)
+        self._current_body_quat_w[..., 3] = 1.0
+        self._current_body_lin_vel_w = torch.zeros_like(self._current_body_pos_w)
+        self._current_body_ang_vel_w = torch.zeros_like(self._current_body_pos_w)
+
+        self._current_object_pos_w = torch.zeros(self.num_envs, 0, device=self.device)
+        self._current_object_quat_w = torch.zeros(self.num_envs, 0, device=self.device)
+        self._current_object_lin_vel_w = torch.zeros(self.num_envs, 0, device=self.device)
+        if self.motion.has_object:
+            self._current_object_pos_w = torch.zeros_like(self.motion._object_pos_w[self.time_steps])
+            self._current_object_quat_w = torch.zeros_like(self.motion._object_quat_w[self.time_steps])
+            self._current_object_lin_vel_w = torch.zeros_like(self.motion._object_lin_vel_w[self.time_steps])
+
+    def _refresh_motion_cache(self, env_ids: torch.Tensor | None = None) -> None:
+        """刷新当前 timestep 对应的 motion 数据；reset 时可只刷新部分 env。"""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        env_ids = self._ensure_index_tensor(env_ids)
+        if env_ids.numel() == 0:
+            return
+
+        time_steps = self.time_steps[env_ids]
+        self._current_joint_pos[env_ids] = self.motion._joint_pos[time_steps][:, self._joint_indexes_in_motion]
+        self._current_joint_vel[env_ids] = self.motion._joint_vel[time_steps][:, self._joint_indexes_in_motion]
+        self._current_body_pos_w[env_ids] = self.motion._body_pos_w[time_steps][:, self._body_indexes_in_motion]
+        self._current_body_quat_w[env_ids] = self.motion._body_quat_w[time_steps][:, self._body_indexes_in_motion]
+        self._current_body_lin_vel_w[env_ids] = self.motion._body_lin_vel_w[time_steps][:, self._body_indexes_in_motion]
+        self._current_body_ang_vel_w[env_ids] = self.motion._body_ang_vel_w[time_steps][:, self._body_indexes_in_motion]
+
+        if self.motion.has_object:
+            self._current_object_pos_w[env_ids] = self.motion._object_pos_w[time_steps]
+            self._current_object_quat_w[env_ids] = self.motion._object_quat_w[time_steps]
+            self._current_object_lin_vel_w[env_ids] = self.motion._object_lin_vel_w[time_steps]
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""

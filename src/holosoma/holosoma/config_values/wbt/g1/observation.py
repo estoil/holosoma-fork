@@ -66,11 +66,6 @@ critic_obs_shared_terms = {
         scale=1.0,
         noise=0.0,
     ),
-    "base_lin_vel": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:base_lin_vel",
-        scale=1.0,
-        noise=0.0,
-    ),
     "base_ang_vel": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:base_ang_vel",
         scale=1.0,

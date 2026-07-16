@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING, List
 
 import torch
+from loguru import logger
 
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
@@ -106,6 +107,97 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
     return torch.exp(-error.mean(-1) / sigma**2)
+
+#新增ZMP设计
+class ZMPSupportRegionReward(RewardTermBase):
+    """基于 ZMP 是否落在脚底支撑区域附近的稳定性奖励。"""
+
+    _CONTACT_BODY_ALIASES = {
+        "left_foot_contact_point": "left_ankle_roll_link",
+        "right_foot_contact_point": "right_ankle_roll_link",
+    }
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.sigma = cfg.params.get("sigma", 0.05)
+        self.support_margin = cfg.params.get("support_margin", 0.04)
+        self.vertical_force_threshold = cfg.params.get("vertical_force_threshold", 1.0)
+        self.debug_log_interval = int(cfg.params.get("debug_log_interval", 0))
+        self._call_count = 0
+
+        contact_body_names = cfg.params.get(
+            "contact_body_names", ("left_ankle_roll_link", "right_ankle_roll_link")
+        )
+        resolved_contact_body_names = self._resolve_contact_body_names(list(contact_body_names))
+        self.contact_body_indexes = self._get_index_of_a_in_b(
+            resolved_contact_body_names,
+            self.env.simulator.body_names,  # type: ignore[attr-defined]
+            self.env.device,
+        )
+        logger.info(
+            "ZMPSupportRegionReward: using contact bodies {} (indexes={})",
+            resolved_contact_body_names,
+            self.contact_body_indexes.detach().cpu().tolist(),
+        )
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        contact_pos_w = self.env.simulator._rigid_body_pos[:, self.contact_body_indexes, :]  # type: ignore[attr-defined]
+        contact_forces_w = self.env.simulator.contact_forces[:, self.contact_body_indexes, :]  # type: ignore[attr-defined]
+
+        fz = torch.clamp(contact_forces_w[..., 2], min=0.0)
+        total_fz = torch.sum(fz, dim=1)
+        has_support = total_fz > self.vertical_force_threshold
+        safe_total_fz = torch.clamp(total_fz, min=self.vertical_force_threshold)
+        self._maybe_log_debug_stats(total_fz, has_support)
+
+        # 地面 ZMP 常用形式：p_z^xy = sum_i(p_i^xy * f_i^z) / sum_i(f_i^z)
+        zmp_xy = torch.sum(contact_pos_w[..., :2] * fz.unsqueeze(-1), dim=1) / safe_total_fz.unsqueeze(-1)
+
+        # 用接触点 xy 的包围盒近似支撑区域，margin 表示允许的脚底/接触面扩展。
+        support_min_xy = torch.min(contact_pos_w[..., :2], dim=1).values - self.support_margin
+        support_max_xy = torch.max(contact_pos_w[..., :2], dim=1).values + self.support_margin
+        clipped_zmp_xy = torch.minimum(torch.maximum(zmp_xy, support_min_xy), support_max_xy)
+        outside_error = torch.sum(torch.square(zmp_xy - clipped_zmp_xy), dim=1)
+
+        reward = torch.exp(-outside_error / self.sigma**2)
+        return torch.where(has_support, reward, torch.zeros_like(reward))
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _resolve_contact_body_names(self, body_names: list[str]) -> list[str]:
+        """把辅助接触点名称映射到真实承力 body，避免读取到全 0 的 contact force。"""
+        simulator_body_names = self.env.simulator.body_names  # type: ignore[attr-defined]
+        resolved = []
+        for name in body_names:
+            alias = self._CONTACT_BODY_ALIASES.get(name, name)
+            if alias != name and alias in simulator_body_names:
+                logger.warning("ZMPSupportRegionReward: remap contact body '{}' -> '{}'", name, alias)
+                resolved.append(alias)
+            else:
+                resolved.append(name)
+        return resolved
+
+    def _maybe_log_debug_stats(self, total_fz: torch.Tensor, has_support: torch.Tensor) -> None:
+        """定期打印 ZMP 接触力诊断，确认 reward 是否读到了真实支撑力。"""
+        self._call_count += 1
+        if self.debug_log_interval <= 0 or self._call_count % self.debug_log_interval != 0:
+            return
+
+        logger.info(
+            "ZMPSupportRegionReward: mean_total_fz={:.3f}, max_total_fz={:.3f}, support_ratio={:.3f}",
+            float(total_fz.mean().detach().cpu()),
+            float(total_fz.max().detach().cpu()),
+            float(has_support.float().mean().detach().cpu()),
+        )
+
+    def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
+        indexes = []
+        for name in a_names:
+            assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
+            indexes.append(b_names.index(name))
+        return torch.tensor(indexes, dtype=torch.long, device=device)
 
 
 # ================================================================================================
