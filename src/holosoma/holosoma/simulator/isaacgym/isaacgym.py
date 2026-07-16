@@ -558,6 +558,12 @@ class IsaacGym(BaseSimulator):
     def find_rigid_body_indice(self, body_name):
         return self.gym.find_actor_rigid_body_handle(self.envs[0], self.robot_handles[0], body_name)
 
+    def get_body_masses(self) -> torch.Tensor:
+        """Per-body masses (kg) ordered like ``self.body_names``, read once from the gym actor props."""
+        props = self.gym.get_actor_rigid_body_properties(self.envs[0], self.robot_handles[0])
+        masses = [float(props[i].mass) for i in range(self.num_bodies)]
+        return torch.tensor(masses, dtype=torch.float32, device=self.device)
+
     def _get_base_body_name(self, preference_order: list[str]) -> str:
         """Get the base body name with fallback logic.
 

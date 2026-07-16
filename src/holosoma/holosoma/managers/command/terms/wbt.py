@@ -158,6 +158,21 @@ class MotionLoader:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+
+            # Reference support phase/state, precomputed offline by add_reference_support_phase.py.
+            # Always materialize full-length (T,...) arrays so the MotionCommand properties never
+            # index out of range; fall back to "always in contact" if a clip predates preprocessing.
+            if "reference_support_phase" in data and "reference_support_state" in data:
+                self._reference_support_phase = torch.tensor(
+                    data["reference_support_phase"], dtype=torch.float32, device=device
+                )
+                self._reference_support_state = torch.tensor(
+                    data["reference_support_state"], dtype=torch.long, device=device
+                )
+            else:
+                num_frames = body_pos_w_raw.shape[0]
+                self._reference_support_phase = torch.ones(num_frames, 2, dtype=torch.float32, device=device)
+                self._reference_support_state = torch.zeros(num_frames, dtype=torch.long, device=device)
         return body_names, joint_names
 
     @property
@@ -226,6 +241,13 @@ class MotionLoader:
                     ("object_lin_vel", "_object_lin_vel_w"),
                 ]
             )
+        # Support phase is always present on MotionLoader; soft-transition segments should include it.
+        concat_targets.extend(
+            [
+                ("reference_support_phase", "_reference_support_phase"),
+                ("reference_support_state", "_reference_support_state"),
+            ]
+        )
 
         for seg_key, attr_name in concat_targets:
             existing = getattr(self, attr_name)
@@ -390,6 +412,9 @@ class MultiMotionLoader:
         self._body_quat_w = torch.cat([ld._body_quat_w for ld in loaders], dim=0)
         self._body_lin_vel_w = torch.cat([ld._body_lin_vel_w for ld in loaders], dim=0)
         self._body_ang_vel_w = torch.cat([ld._body_ang_vel_w for ld in loaders], dim=0)
+        # Reference support phase/state are always full-length per loader, so concat unconditionally.
+        self._reference_support_phase = torch.cat([ld._reference_support_phase for ld in loaders], dim=0)
+        self._reference_support_state = torch.cat([ld._reference_support_state for ld in loaders], dim=0)
 
         # Use indexes from first loader (all loaders share the same robot)
         self._joint_indexes = loaders[0]._joint_indexes
@@ -433,7 +458,7 @@ class MultiMotionLoader:
 
         try:
             payload = torch.load(cache, map_location=device)
-            if payload.get("cache_version") != 1:
+            if payload.get("cache_version") not in (1, 2):
                 logger.warning("MultiMotionLoader: cache version mismatch, rebuilding {}", cache)
                 return False
 
@@ -463,6 +488,14 @@ class MultiMotionLoader:
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
 
+            if "reference_support_phase" in payload and "reference_support_state" in payload:
+                self._reference_support_phase = payload["reference_support_phase"].to(device=device)
+                self._reference_support_state = payload["reference_support_state"].to(device=device)
+            else:
+                # Old caches (v1) lack support phase: rebuild so OBD terms see consistent data.
+                logger.warning("MultiMotionLoader: cache missing support phase, rebuilding {}", cache)
+                return False
+
             logger.info("MultiMotionLoader: loaded merged motion cache from {}", cache)
             return True
         except Exception as exc:
@@ -475,7 +508,7 @@ class MultiMotionLoader:
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "cache_version": 1,
+                "cache_version": 2,
                 "loaded_motion_files": self.loaded_motion_files,
                 "body_names": first_loader.body_names_in_motion_data,
                 "joint_names": first_loader.joint_names_in_motion_data,
@@ -490,6 +523,8 @@ class MultiMotionLoader:
                 "body_ang_vel_w": self._body_ang_vel_w.detach().cpu(),
                 "fps": self.fps,
                 "has_object": self.has_object,
+                "reference_support_phase": self._reference_support_phase.detach().cpu(),
+                "reference_support_state": self._reference_support_state.detach().cpu(),
             }
             if self.has_object:
                 payload.update(
@@ -570,6 +605,12 @@ class MultiMotionLoader:
                     ("object_lin_vel", "_object_lin_vel_w"),
                 ]
             )
+        concat_targets.extend(
+            [
+                ("reference_support_phase", "_reference_support_phase"),
+                ("reference_support_state", "_reference_support_state"),
+            ]
+        )
 
         added_frames = 0
         for seg_key, attr_name in concat_targets:
@@ -1253,6 +1294,40 @@ class MotionCommand(CommandTermBase):
         return self._current_object_lin_vel_w
 
     #########################################################################################
+    ## Reference support phase (precomputed offline; consumed by the contact-mismatch reward)
+    #########################################################################################
+    @property
+    def reference_support_phase(self) -> torch.Tensor:
+        # Soft per-foot contact in [0, 1] for the current frame, columns [left, right]. (num_envs, 2)
+        return self._current_reference_support_phase
+
+    @property
+    def reference_support_state(self) -> torch.Tensor:
+        # Discrete support state for the current frame: 0=double 1=left 2=right 3=flight. (num_envs,)
+        return self._current_reference_support_state
+
+    def future_support_phase(self, k: int) -> torch.Tensor:
+        """Reference support phase k frames ahead (clamped to current clip end). (num_envs, 2)"""
+        return self._sample_motion_future(self.motion._reference_support_phase, k)
+
+    def future_joint_pos(self, k: int) -> torch.Tensor:
+        """Reference joint positions k frames ahead (clamped to current clip end). (num_envs, num_joints)"""
+        return self._sample_motion_future(self.motion._joint_pos, k, self._joint_indexes_in_motion)
+
+    def future_joint_vel(self, k: int) -> torch.Tensor:
+        """Reference joint velocities k frames ahead (clamped to current clip end). (num_envs, num_joints)"""
+        return self._sample_motion_future(self.motion._joint_vel, k, self._joint_indexes_in_motion)
+
+    def _sample_motion_future(self, base: torch.Tensor, k: int, col_index: torch.Tensor | None = None) -> torch.Tensor:
+        """Gather k frames ahead, clamped per-env to the CURRENT clip's last frame."""
+        end_idx = self.motion.motion_end_idx[self.motion_ids]
+        future_steps = torch.minimum(self.time_steps + k, end_idx - 1)
+        out = base[future_steps]
+        if col_index is not None:
+            out = out.index_select(1, col_index)
+        return out
+
+    #########################################################################################
     ## Object from simulator
     #########################################################################################
     @property
@@ -1309,6 +1384,9 @@ class MotionCommand(CommandTermBase):
             self._current_object_quat_w = torch.zeros_like(self.motion._object_quat_w[self.time_steps])
             self._current_object_lin_vel_w = torch.zeros_like(self.motion._object_lin_vel_w[self.time_steps])
 
+        self._current_reference_support_phase = torch.zeros(self.num_envs, 2, device=self.device)
+        self._current_reference_support_state = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
     def _refresh_motion_cache(self, env_ids: torch.Tensor | None = None) -> None:
         """刷新当前 timestep 对应的 motion 数据；reset 时可只刷新部分 env。"""
         if env_ids is None:
@@ -1329,6 +1407,9 @@ class MotionCommand(CommandTermBase):
             self._current_object_pos_w[env_ids] = self.motion._object_pos_w[time_steps]
             self._current_object_quat_w[env_ids] = self.motion._object_quat_w[time_steps]
             self._current_object_lin_vel_w[env_ids] = self.motion._object_lin_vel_w[time_steps]
+
+        self._current_reference_support_phase[env_ids] = self.motion._reference_support_phase[time_steps]
+        self._current_reference_support_state[env_ids] = self.motion._reference_support_state[time_steps]
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""
@@ -1480,6 +1561,9 @@ class MotionCommand(CommandTermBase):
             "object_pos": object_pos,
             "object_quat": object_quat,
             "object_lin_vel": object_lin_vel,
+            # Default standing pose: treat as double support.
+            "reference_support_phase": torch.ones(2, dtype=torch.float32, device=self.device),
+            "reference_support_state": torch.zeros((), dtype=torch.long, device=self.device),
         }
 
     def _add_transition_to_motion(self, default_state: dict[str, torch.Tensor], num_steps: int, prepend: bool) -> None:
@@ -1616,6 +1700,8 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = self.motion._object_pos_w[idx].to(device=device, dtype=dtype)
             state["object_quat"] = self.motion._object_quat_w[idx].to(device=device, dtype=dtype)
             state["object_lin_vel"] = self.motion._object_lin_vel_w[idx].to(device=device, dtype=dtype)
+        state["reference_support_phase"] = self.motion._reference_support_phase[idx].to(device=device, dtype=dtype)
+        state["reference_support_state"] = self.motion._reference_support_state[idx].to(device=device)
         return state
 
     def _default_motion_state(
@@ -1640,6 +1726,8 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = default_state["object_pos"].to(device=device, dtype=dtype)
             state["object_quat"] = default_state["object_quat"].to(device=device, dtype=dtype)
             state["object_lin_vel"] = default_state["object_lin_vel"].to(device=device, dtype=dtype)
+        state["reference_support_phase"] = default_state["reference_support_phase"].to(device=device, dtype=dtype)
+        state["reference_support_state"] = default_state["reference_support_state"].to(device=device)
         return state
 
     def _build_transition_segments(
@@ -1670,6 +1758,15 @@ class MotionCommand(CommandTermBase):
             segments["object_quat"] = self._slerp_quat_sequence(
                 start["object_quat"].unsqueeze(0), target["object_quat"].unsqueeze(0), alphas
             ).squeeze(1)
+
+        # Soft transitions: lerp continuous phase; hold discrete state until midpoint.
+        segments["reference_support_phase"] = _lerp(
+            start["reference_support_phase"], target["reference_support_phase"], alphas_joint
+        )
+        start_state = start["reference_support_state"].to(dtype=torch.long)
+        target_state = target["reference_support_state"].to(dtype=torch.long)
+        use_target = (alphas >= 0.5).to(dtype=torch.long)
+        segments["reference_support_state"] = start_state.unsqueeze(0) * (1 - use_target) + target_state.unsqueeze(0) * use_target
 
         return segments
 

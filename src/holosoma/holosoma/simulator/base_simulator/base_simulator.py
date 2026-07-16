@@ -305,6 +305,14 @@ class BaseSimulator:
         """
         raise NotImplementedError("The 'find_rigid_body_indice' method must be implemented in subclasses.")
 
+    def get_body_masses(self) -> torch.Tensor:
+        """Per-body masses (kg) of the robot, ordered like ``body_names``.
+
+        Returns:
+            torch.Tensor: shape ``(num_bodies,)`` on the sim device.
+        """
+        raise NotImplementedError("The 'get_body_masses' method must be implemented in subclasses.")
+
     # ----- Simulation Preparation and Refresh Methods -----
 
     def prepare_sim(self):

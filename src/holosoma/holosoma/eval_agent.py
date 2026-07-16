@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import tyro
 from loguru import logger
@@ -67,7 +68,39 @@ def run_eval_with_tyro(
     exported_policy_dir_path = os.path.join(checkpoint_dir, "exported")
     os.makedirs(exported_policy_dir_path, exist_ok=True)
     exported_policy_name = checkpoint_path.split("/")[-1]  # example: model_5000.pt
-    exported_onnx_name = exported_policy_name.replace(".pt", ".onnx")  # example: model_5000.onnx
+
+    # Tag the ONNX name with the eval motion so different motions exported from the SAME checkpoint
+    # don't overwrite each other (the motion clip is baked into the ONNX). e.g.:
+    #   sample_right_2670_mj.npz  ->  model_0400000_right_2670.onnx
+    # NOTE: after load_saved_experiment_config + get_eval_config, nested config nodes can be plain
+    # dicts rather than dataclasses, so each level must be accessed defensively (dict key OR attribute).
+    def _dig(obj, key):
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    motion_tag = ""
+    try:
+        node = _dig(tyro_config, "command")
+        node = _dig(node, "setup_terms")
+        node = _dig(node, "motion_command")
+        node = _dig(node, "params")
+        motion_cfg = _dig(node, "motion_config")
+        # The loader uses motion_dir when set, else motion_file; tag from whichever is active.
+        motion_path = _dig(motion_cfg, "motion_dir") or _dig(motion_cfg, "motion_file") or ""
+        if motion_path:
+            tag = os.path.splitext(os.path.basename(os.path.normpath(motion_path)))[0]
+            if tag.endswith("_mj"):
+                tag = tag[:-3]
+            if tag.startswith("sample_"):
+                tag = tag[len("sample_") :]
+            motion_tag = re.sub(r"[^A-Za-z0-9._-]", "_", tag).strip("_")
+    except Exception as exc:  # noqa: BLE001 - non-fatal; fall back to the plain checkpoint name
+        logger.warning(f"Could not derive motion tag for ONNX filename: {exc}")
+
+    onnx_suffix = f"_{motion_tag}.onnx" if motion_tag else ".onnx"
+    exported_onnx_name = exported_policy_name.replace(".pt", onnx_suffix)  # e.g. model_5000_right_2670.onnx
+    logger.info(f"ONNX export name: {exported_onnx_name}  (motion tag: '{motion_tag}')")
 
     if tyro_config.training.export_onnx:
         exported_onnx_path = os.path.join(exported_policy_dir_path, exported_onnx_name)

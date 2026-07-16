@@ -18,7 +18,7 @@ actor_obs_shared = ObsGroupCfg(
             noise=0.05,
         ),
         "base_ang_vel": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",  # 回退 0705(去掉 IMU OU 变体),2026-07-15
             scale=1.0,
             noise=0.2,
         ),
@@ -36,6 +36,36 @@ actor_obs_shared = ObsGroupCfg(
             func="holosoma.managers.observation.terms.wbt:actions",
             scale=1.0,
             noise=0.0,
+        ),
+        "projected_gravity": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:projected_gravity",  # 回退 0705(去掉 IMU OU 变体),2026-07-15
+            scale=1.0,
+            noise=0.03,
+        ),
+        "reference_support_phase": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:reference_support_phase",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "future_support_phase": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:future_support_phase",
+            params={"num_future_frames": 5},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "future_cmd": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:future_cmd",
+            params={"num_future_frames": 5},
+            scale=1.0,
+            noise=0.0,
+        ),
+        # DEPLOYABLE balance obs: CoM-rel-support-center 位置 + 相对速度,base 系,共 4 维。
+        # 纯 FK(编码器 + IMU 陀螺),不需 base 线速度/绝对位置;动态世界系 xCoM 留 critic 特权。
+        # noise=0.015:上真机前的域随机(覆盖编码器速度噪声 + 质量/运动学模型误差)。
+        "whole_body_com_rel_support_center": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:whole_body_com_rel_support_center",
+            scale=1.0,
+            noise=0.015,
         ),
     },
 )
@@ -66,6 +96,11 @@ critic_obs_shared_terms = {
         scale=1.0,
         noise=0.0,
     ),
+    "base_lin_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+        scale=1.0,
+        noise=0.0,
+    ),
     "base_ang_vel": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:base_ang_vel",
         scale=1.0,
@@ -83,6 +118,35 @@ critic_obs_shared_terms = {
     ),
     "actions": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:actions",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "projected_gravity": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:projected_gravity",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "reference_support_phase": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:reference_support_phase",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "future_support_phase": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:future_support_phase",
+        params={"num_future_frames": 5},
+        scale=1.0,
+        noise=0.0,
+    ),
+    "future_cmd": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:future_cmd",
+        params={"num_future_frames": 5},
+        scale=1.0,
+        noise=0.0,
+    ),
+    # PRIVILEGED / critic-only: xCoM relative to support-foot center (base frame). 故意不加进 actor:
+    # 它依赖世界系 CoM 速度,真机不可靠 → 加 actor 会有 sim2real gap。critic 仅训练用,不部署。
+    "whole_body_xcom_rel_support_center": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:whole_body_xcom_rel_support_center",
         scale=1.0,
         noise=0.0,
     ),

@@ -25,6 +25,18 @@ robot_state_dr_at_setup = {
             "enabled": True,
         },
     ),
+    # 连杆质量随机化(sim2real):逐连杆 ±10% 缩放。真机质量≠URDF,也增强质心 obs 的鲁棒性。
+    # 只随机连杆质量;base/torso 不动(base CoM 偏移已由 randomize_base_com_startup 单独随机)。
+    "randomize_mass_startup": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_mass_startup",
+        params={
+            "enable_link_mass": True,
+            "link_mass_range": [0.9, 1.1],
+            "enable_base_mass": False,
+            "added_mass_range": [0.0, 0.0],
+            "enabled": True,
+        },
+    ),
 }
 
 object_state_dr_at_setup = {
@@ -63,7 +75,7 @@ base_setup_terms = {
     "push_randomizer_state": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
         params={
-            "push_interval_s": [1.0, 3.0],
+            "push_interval_s": [1.0, 3.0],  # 回退续训 DR:退回 [1,3](从零训不加额外高频 push),2026-07-13
             "max_push_vel": [0.5, 0.5, 0.2, 0.52, 0.52, 0.78],
             "enabled": True,
         },
@@ -82,7 +94,7 @@ base_setup_terms = {
         func="holosoma.managers.randomization.terms.locomotion:setup_action_delay_buffers",
         params={
             "ctrl_delay_step_range": [0, 1],
-            "enabled": False,
+            "enabled": False,  # 关延迟:HuB 消融里它非关键缺口、且打断反馈时序代价最大(reward 22→15)。IMU噪声才是大头
         },
     ),
     **robot_state_dr_at_setup,

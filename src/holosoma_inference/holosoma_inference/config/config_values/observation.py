@@ -106,6 +106,8 @@ loco_t1_29dof = ObservationConfig(
 
 wbt = ObservationConfig(
     obs_dict={
+        # Must match the TRAINING actor_obs (holosoma config_values/wbt/g1/observation.py).
+        # Concatenation order is alphabetical (BasePolicy sorts term names), same as training.
         "actor_obs": [
             "motion_command",
             "motion_ref_ori_b",
@@ -113,6 +115,11 @@ wbt = ObservationConfig(
             "dof_pos",
             "dof_vel",
             "actions",
+            "projected_gravity",
+            "reference_support_phase",
+            "future_support_phase",
+            "future_cmd",
+            "whole_body_com_rel_support_center",
         ]
     },
     obs_dims={
@@ -124,6 +131,11 @@ wbt = ObservationConfig(
         "dof_pos": 29,
         "dof_vel": 29,
         "actions": 29,
+        "projected_gravity": 3,
+        "reference_support_phase": 2,
+        "future_support_phase": 10,  # K=5 future frames x 2 feet
+        "future_cmd": 290,  # K=5 future frames x (29 joint_pos + 29 joint_vel)
+        "whole_body_com_rel_support_center": 4,  # base-frame [CoM-rel-support pos_xy, rel_vel_xy]
     },
     obs_scales={
         "actions": 1.0,
@@ -136,6 +148,11 @@ wbt = ObservationConfig(
         "dof_vel": 1.0,
         "robot_body_pos_b": 1.0,
         "robot_body_ori_b": 1.0,
+        "projected_gravity": 1.0,
+        "reference_support_phase": 1.0,
+        "future_support_phase": 1.0,
+        "future_cmd": 1.0,
+        "whole_body_com_rel_support_center": 1.0,
     },
     history_length_dict={
         "actor_obs": 1,

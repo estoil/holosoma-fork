@@ -28,7 +28,7 @@ g1_29dof_wbt = ExperimentConfig(
             algo.ppo.config,
             num_learning_iterations=30000,
             num_learning_epochs=5,
-            save_interval=5000,
+            save_interval=4000,
             entropy_coef=0.005,
             init_noise_std=1.0,
             actor_learning_rate=1e-3,
@@ -93,6 +93,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
         config=replace(
             algo.fast_sac.config,
             num_learning_iterations=400000,
+            save_interval=1000,  # 密存供 SWA 平均
             v_max=20.0,
             v_min=-20.0,
             gamma=0.99,  # For motion tracking, high gamma + high num_steps is better

@@ -33,7 +33,8 @@ motion_config = MotionConfig(
         "right_wrist_yaw_link",
     ],
     body_name_ref=["torso_link"],
-    use_adaptive_timesteps_sampler=True,
+    use_adaptive_timesteps_sampler=False,  # 关采样器 → 非frame0的起始帧走均匀随机
+    start_at_timestep_zero_prob=1.0,  # 100% 从 frame0，避免中段 RSI 掩盖单脚失败
     noise_to_initial_pose=init_pose_config,
 )
 

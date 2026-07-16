@@ -82,6 +82,30 @@ def projected_gravity(env: WholeBodyTrackingManager) -> torch.Tensor:
     return get_projected_gravity(env)
 
 
+def _apply_imu_ou(env: WholeBodyTrackingManager, vec_base: torch.Tensor) -> torch.Tensor:
+    """Apply the shared IMU orientation-error (OU noise ``env._imu_ou_euler``) to a base-frame vector.
+
+    HuB (arXiv:2505.07294) idea: a single temporally-correlated root-orientation error should perturb
+    ALL orientation-derived observations together (coupled), unlike independent per-term white noise.
+    Small-angle rotation R(δ)·v ≈ v + δ × v, so projected_gravity and base_ang_vel get the SAME δ.
+    ``_imu_ou_euler`` is advanced once per step in the env and zeroed during eval -> this is a no-op there.
+    """
+    ou = getattr(env, "_imu_ou_euler", None)
+    if ou is None:
+        return vec_base
+    return vec_base + torch.cross(ou, vec_base, dim=-1)
+
+
+def base_ang_vel_ou(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """base_ang_vel + coupled IMU OU orientation noise (actor-only; critic keeps the clean term)."""
+    return _apply_imu_ou(env, get_base_ang_vel(env))
+
+
+def projected_gravity_ou(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """projected_gravity + coupled IMU OU orientation noise (actor-only; critic keeps the clean term)."""
+    return _apply_imu_ou(env, get_projected_gravity(env))
+
+
 def dof_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Joint positions relative to default positions.
 
@@ -133,6 +157,123 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
 def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     return motion_command.command
+
+
+def reference_support_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Reference support phase (soft per-foot contact [0,1], columns [left, right]) at the current frame. (N, 2)"""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.reference_support_phase
+
+
+def future_support_phase(env: WholeBodyTrackingManager, num_future_frames: int = 10) -> torch.Tensor:
+    """Reference support phase for t+1 ... t+K, concatenated. Shape (N, K*2)."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    phases = [motion_command.future_support_phase(k) for k in range(1, num_future_frames + 1)]
+    return torch.cat(phases, dim=-1)
+
+
+def future_cmd(env: WholeBodyTrackingManager, num_future_frames: int = 10) -> torch.Tensor:
+    """Reference [joint_pos, joint_vel] for t+1 ... t+K, concatenated. Shape (N, K*2*num_joints)."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    frames = []
+    for k in range(1, num_future_frames + 1):
+        jp = motion_command.future_joint_pos(k)
+        jv = motion_command.future_joint_vel(k)
+        frames.append(torch.cat([jp, jv], dim=-1))
+    return torch.cat(frames, dim=-1)
+
+
+def whole_body_xcom_rel_support_center(
+    env: WholeBodyTrackingManager,
+    threshold: float = 1.0,
+    gravity: float = 9.81,
+    com_height_floor: float = 0.25,
+) -> torch.Tensor:
+    """xCoM relative to the support-foot center, in base frame (xy). Shape (N, 2).
+
+    PRIVILEGED / CRITIC-ONLY: built from the whole-body mass-weighted CoM + CoM velocity, which are
+    NOT reliably observable in world frame on the real robot (base linear velocity has no direct
+    sensor). Keep this OUT of the deployed actor obs to avoid a sim2real gap. Faithful port of
+    whole_body_tracking.whole_body_xcom_rel_support_center_b: support center = contact-weighted mean
+    of the in-contact feet (fallback = mean of both feet); vector rotated into the base frame.
+    """
+    from holosoma.managers.reward.terms.wbt import (
+        _resolve_foot_body_indexes,
+        _support_contact_mask,
+        _whole_body_com_state,
+        _xcom_xy,
+    )
+
+    foot_ids = _resolve_foot_body_indexes(env)
+    masses = getattr(env, "_wb_body_masses_cache", None)
+    if masses is None:
+        masses = env.simulator.get_body_masses()
+        env._wb_body_masses_cache = masses
+        env._wb_total_mass_cache = masses.sum().clamp_min(1e-6)
+    com_pos, com_vel = _whole_body_com_state(env, masses, env._wb_total_mass_cache)
+    xcom_xy = _xcom_xy(com_pos, com_vel, gravity, com_height_floor)
+
+    foot_xy = env.simulator._rigid_body_pos[:, foot_ids, :2]  # (N, 2, 2)
+    support_mask = _support_contact_mask(env, foot_ids, threshold)  # (N, 2) bool
+    w = support_mask.to(foot_xy.dtype).unsqueeze(-1)
+    weighted = (foot_xy * w).sum(dim=1) / w.sum(dim=1).clamp_min(1.0)
+    fallback = foot_xy.mean(dim=1)
+    has_support = torch.any(support_mask, dim=1, keepdim=True)
+    center_xy = torch.where(has_support, weighted, fallback)
+
+    rel_w = torch.zeros((env.num_envs, 3), device=xcom_xy.device, dtype=xcom_xy.dtype)
+    rel_w[:, :2] = xcom_xy - center_xy
+    return quat_rotate_inverse(_base_quat(env), rel_w, w_last=True)[:, :2]
+
+
+def whole_body_com_rel_support_center(
+    env: WholeBodyTrackingManager, double_support_height_diff: float = 0.03
+) -> torch.Tensor:
+    """CoM-rel-support-center POSITION + relative VELOCITY (base frame, xy). (N, 4).
+
+    DEPLOYABLE actor obs: both are RELATIVE (CoM minus support center), so base LINEAR velocity and
+    absolute base position CANCEL in the difference -> computable from joint encoders + IMU (no
+    base-velocity estimate / leg odometry needed). Position = pure FK; velocity = CoM_vel - support_center_vel
+    (during stance the foot is ~stationary, so this ~= world CoM velocity = the capture-point/xCoM velocity
+    term). Residual sim2real gap is only q-dot noise + CoM mass-model error (add DR noise before deploy).
+    Support center = mean of in-contact feet; support is selected from gravity-aligned FOOT HEIGHT
+    (lower foot supports; both within ``double_support_height_diff`` -> double support), matching the
+    deploy-side rule EXACTLY (sim2sim/sim2real) so there is no train->deploy gap at foot lift/land.
+    """
+    from holosoma.managers.reward.terms.wbt import (
+        _resolve_foot_body_indexes,
+        _support_height_mask,
+        _whole_body_com_state,
+    )
+
+    foot_ids = _resolve_foot_body_indexes(env)
+    masses = getattr(env, "_wb_body_masses_cache", None)
+    if masses is None:
+        masses = env.simulator.get_body_masses()
+        env._wb_body_masses_cache = masses
+        env._wb_total_mass_cache = masses.sum().clamp_min(1e-6)
+    com_pos, com_vel = _whole_body_com_state(env, masses, env._wb_total_mass_cache)
+
+    foot_pos = env.simulator._rigid_body_pos[:, foot_ids, :2]  # (N, 2, 2)
+    foot_vel = env.simulator._rigid_body_vel[:, foot_ids, :2]  # (N, 2, 2)
+    # Height-based support (matches deploy) instead of contact force -> no train->deploy gap.
+    support_mask = _support_height_mask(env, foot_ids, double_support_height_diff)  # (N, 2) bool
+    w = support_mask.to(foot_pos.dtype).unsqueeze(-1)
+    wsum = w.sum(dim=1).clamp_min(1.0)
+    has_support = torch.any(support_mask, dim=1, keepdim=True)
+    center_pos = torch.where(has_support, (foot_pos * w).sum(dim=1) / wsum, foot_pos.mean(dim=1))
+    center_vel = torch.where(has_support, (foot_vel * w).sum(dim=1) / wsum, foot_vel.mean(dim=1))
+
+    # Direct relative velocity (CoM - support center): base LINEAR velocity cancels in the difference,
+    # so deployable from encoders+IMU (no base-vel estimate). No buffer -> immune to the obs-runs-twice
+    # bug. During stance (foot ~stationary) it ~= world CoM velocity = the xCoM/capture-point velocity term.
+    rel_pos_w = torch.zeros((env.num_envs, 3), device=com_pos.device, dtype=com_pos.dtype)
+    rel_pos_w[:, :2] = com_pos[:, :2] - center_pos
+    rel_vel_w = torch.zeros((env.num_envs, 3), device=com_vel.device, dtype=com_vel.dtype)
+    rel_vel_w[:, :2] = com_vel[:, :2] - center_vel
+    pos_b = quat_rotate_inverse(_base_quat(env), rel_pos_w, w_last=True)[:, :2]
+    vel_b = quat_rotate_inverse(_base_quat(env), rel_vel_w, w_last=True)[:, :2]
+    return torch.cat([pos_b, vel_b], dim=-1)  # (N, 4): [CoM-rel-support position, relative velocity], base frame
 
 
 def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:

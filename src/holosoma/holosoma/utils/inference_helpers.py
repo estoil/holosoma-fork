@@ -140,7 +140,7 @@ def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_na
 
 
 class _OnnxMotionPolicyExporter(torch.nn.Module):
-    def __init__(self, motion_command, actor, device):
+    def __init__(self, motion_command, actor, device, num_future_frames: int = 5):
         super().__init__()
         self.device = device
         # Extract the underlying actor model and input dimension generically
@@ -163,6 +163,14 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         self.joint_vel = joint_vel.to("cpu")
         self.ref_body_pos_w = ref_body_pos_w.to("cpu")
         self.ref_body_quat_w = ref_body_quat_w.to("cpu")
+        # Reference support phase (T, 2) = soft per-foot contact [left, right], precomputed offline by
+        # add_reference_support_phase.py. Baked in so the deployed obs (reference_support_phase /
+        # future_support_phase) is sourced from the SAME motion data as training.
+        self.reference_support_phase = motion._reference_support_phase.to("cpu")
+        # K-step look-ahead for future_support_phase / future_cmd. MUST equal num_future_frames in the
+        # WBT observation config; a mismatch makes the assembled deploy obs dim != trained obs dim and
+        # fails loudly at the ONNX input (rather than silently feeding garbage).
+        self.num_future_frames = int(num_future_frames)
 
         self.time_step_total = self.joint_pos.shape[0]
 
@@ -188,13 +196,29 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         return ActorWrapper(actor_model)
 
     def forward(self, x, time_step):
-        time_step_clamped = torch.clamp(time_step.long().squeeze(-1), max=self.time_step_total - 1)
+        last = self.time_step_total - 1
+        time_step_clamped = torch.clamp(time_step.long().squeeze(-1), max=last)
+        # Future frame indices t+1 .. t+K, clamped to the clip end — matches the training-side
+        # MotionCommand._sample_motion_future (future_steps = min(t + k, end_idx - 1)).
+        future_idx = [torch.clamp(time_step_clamped + k, max=last) for k in range(1, self.num_future_frames + 1)]
+        # reference_support_phase[t] -> (N, 2)
+        reference_support_phase = self.reference_support_phase[time_step_clamped]
+        # future_support_phase = concat_{k=1..K} support_phase[t+k] -> (N, K*2)
+        future_support_phase = torch.cat([self.reference_support_phase[idx] for idx in future_idx], dim=-1)
+        # future_cmd = concat_{k=1..K} [joint_pos[t+k], joint_vel[t+k]] -> (N, K*2*num_joints)
+        future_cmd = torch.cat(
+            [torch.cat([self.joint_pos[idx], self.joint_vel[idx]], dim=-1) for idx in future_idx],
+            dim=-1,
+        )
         return (
             self._wrapped_actor(x),
             self.joint_pos[time_step_clamped],
             self.joint_vel[time_step_clamped],
             self.ref_body_pos_w[time_step_clamped],
             self.ref_body_quat_w[time_step_clamped],
+            reference_support_phase,
+            future_support_phase,
+            future_cmd,
         )
 
     def export(self, onnx_file_path: str):
@@ -211,7 +235,16 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
             opset_version=13,
             verbose=False,
             input_names=["obs", "time_step"],
-            output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],
+            output_names=[
+                "actions",
+                "joint_pos",
+                "joint_vel",
+                "ref_pos_xyz",
+                "ref_quat_xyzw",
+                "reference_support_phase",
+                "future_support_phase",
+                "future_cmd",
+            ],
             dynamo=False,
         )
         self.to(self.device)
@@ -222,8 +255,9 @@ def export_motion_and_policy_as_onnx(
     motion_command: object,
     onnx_file_path: str,
     device: str,
+    num_future_frames: int = 5,
 ):
-    policy_exporter = _OnnxMotionPolicyExporter(motion_command, actor, device)
+    policy_exporter = _OnnxMotionPolicyExporter(motion_command, actor, device, num_future_frames=num_future_frames)
     policy_exporter.export(onnx_file_path)
 
 

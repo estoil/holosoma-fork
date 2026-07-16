@@ -16,6 +16,7 @@ from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.math.quat import (
     matrix_from_quat,
     quat_mul,
+    quat_rotate_inverse,
     quat_to_rpy,
     rpy_to_quat,
     subtract_frame_transforms,
@@ -57,12 +58,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super().__init__(config)
         self._configure_action_scales()
 
-        # Load stiff startup parameters from robot config
-        if config.robot.stiff_startup_pos is not None:
-            self._stiff_hold_q = np.array(config.robot.stiff_startup_pos, dtype=np.float32).reshape(1, -1)
-        else:
-            # Fallback to default_dof_angles if not specified
-            self._stiff_hold_q = np.array(config.robot.default_dof_angles, dtype=np.float32).reshape(1, -1)
+        # Stiff-hold pose = the loaded motion's FRAME-0 pose (motion_command_0), NOT the config default.
+        # Why: the WBT policy is trained to begin at the motion's first frame (RSI). Holding that exact
+        # pose with the STIFF (hard) gains lets the robot stand at frame-0 through gantry removal, so the
+        # policy takes over from a consistent, in-distribution pose -> no jump, no get-ready (`i`) needed.
+        # (Soft get-ready gains can't hold a deep-squat frame-0 freestanding; and a default-vs-frame0
+        # mismatch makes the handoff violent.) motion_command_0 is set in setup_policy() above.
+        self._stiff_hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32).copy()
 
         if config.robot.stiff_startup_kp is not None:
             self._stiff_hold_kp = np.array(config.robot.stiff_startup_kp, dtype=np.float32)
@@ -155,21 +157,53 @@ class WholeBodyTrackingPolicy(BasePolicy):
             raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
         obs = actor_obs_template.copy()
         input_feed = {"obs": obs, "time_step": time_step}
-        outputs = self.onnx_policy_session.run(["joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
+        outputs = self.onnx_policy_session.run(
+            [
+                "joint_pos",
+                "joint_vel",
+                "ref_quat_xyzw",
+                "reference_support_phase",
+                "future_support_phase",
+                "future_cmd",
+            ],
+            input_feed,
+        )
 
-        # motion_command_t/ref_quat_xyzw_t will be used in get_current_obs_buffer_dict
+        # motion_command_t/ref_quat_xyzw_t and the motion-derived obs (support phase + lookahead) are
+        # used in get_current_obs_buffer_dict. They are sourced from the ONNX motion lookup so that the
+        # deploy obs comes from the SAME baked motion data as training.
         self.motion_command_t = np.concatenate(outputs[0:2], axis=1)  # (1, 58)
         self.ref_quat_xyzw_t = outputs[2]
+        self.reference_support_phase_t = outputs[3]  # (1, 2)
+        self.future_support_phase_t = outputs[4]  # (1, K*2)
+        self.future_cmd_t = outputs[5]  # (1, K*2*num_joints)
         # duplicate, will be used in _get_init_target and _handle_stop_policy
         self.motion_command_0 = self.motion_command_t.copy()
         self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+        self.reference_support_phase_0 = self.reference_support_phase_t.copy()
+        self.future_support_phase_0 = self.future_support_phase_t.copy()
+        self.future_cmd_0 = self.future_cmd_t.copy()
 
         def policy_act(input_feed):
-            output = self.onnx_policy_session.run(["actions", "joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
+            output = self.onnx_policy_session.run(
+                [
+                    "actions",
+                    "joint_pos",
+                    "joint_vel",
+                    "ref_quat_xyzw",
+                    "reference_support_phase",
+                    "future_support_phase",
+                    "future_cmd",
+                ],
+                input_feed,
+            )
             action = output[0]
             motion_command = np.concatenate(output[1:3], axis=1)
             ref_quat_xyzw = output[3]
-            return action, motion_command, ref_quat_xyzw
+            reference_support_phase = output[4]
+            future_support_phase = output[5]
+            future_cmd = output[6]
+            return action, motion_command, ref_quat_xyzw, reference_support_phase, future_support_phase, future_cmd
 
         self.policy = policy_act
 
@@ -179,6 +213,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             {
                 "motion_command_0": self.motion_command_0.copy(),
                 "ref_quat_xyzw_0": self.ref_quat_xyzw_0.copy(),
+                "reference_support_phase_0": self.reference_support_phase_0.copy(),
+                "future_support_phase_0": self.future_support_phase_0.copy(),
+                "future_cmd_0": self.future_cmd_0.copy(),
                 "per_joint_policy_action_scale": self.per_joint_policy_action_scale.copy()
                 if self.per_joint_policy_action_scale is not None
                 else None,
@@ -190,6 +227,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super()._restore_policy_state(state)
         self.motion_command_0 = state["motion_command_0"].copy()
         self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
+        self.reference_support_phase_0 = state["reference_support_phase_0"].copy()
+        self.future_support_phase_0 = state["future_support_phase_0"].copy()
+        self.future_cmd_0 = state["future_cmd_0"].copy()
         saved = state["per_joint_policy_action_scale"]
         self.per_joint_policy_action_scale = saved.copy() if saved is not None else None
         self.motion_clip_progressing = False
@@ -202,6 +242,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super()._on_policy_switched(model_path)
         self.motion_command_t = self.motion_command_0.copy()
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self.reference_support_phase_t = self.reference_support_phase_0.copy()
+        self.future_support_phase_t = self.future_support_phase_0.copy()
+        self.future_cmd_t = self.future_cmd_0.copy()
         self.motion_clip_progressing = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
@@ -253,6 +296,31 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # actions
         current_obs_buffer_dict["actions"] = self.last_policy_action
 
+        # projected_gravity (IMU): prefer the interface-appended value, else derive from the base quat.
+        num_dofs = self.num_dofs
+        base_quat = robot_state_data[:, 3:7]  # wxyz
+        expected_len = 7 + num_dofs + 6 + num_dofs
+        if robot_state_data.shape[1] == expected_len + 3:
+            projected_gravity = robot_state_data[:, expected_len : expected_len + 3]
+        else:
+            projected_gravity = quat_rotate_inverse(base_quat, np.array([[0.0, 0.0, -1.0]], dtype=np.float32))
+        current_obs_buffer_dict["projected_gravity"] = projected_gravity
+
+        # Motion-derived obs (same source/timestep as motion_command): the ONNX motion lookup outputs.
+        current_obs_buffer_dict["reference_support_phase"] = self.reference_support_phase_t
+        current_obs_buffer_dict["future_support_phase"] = self.future_support_phase_t
+        current_obs_buffer_dict["future_cmd"] = self.future_cmd_t
+
+        # whole_body_com_rel_support_center: deployable base-frame reconstruction from encoders + IMU +
+        # kinematic/mass model (Pinocchio). Uses RAW joint pos/vel (not the default-subtracted dof_pos).
+        dof_pos_real = robot_state_data[0, 7 : 7 + num_dofs]
+        dof_vel_real = robot_state_data[0, 7 + num_dofs + 6 : 7 + num_dofs + 6 + num_dofs]
+        base_ang_vel_b = robot_state_data[0, 7 + num_dofs + 3 : 7 + num_dofs + 6]
+        com_rel = self.pinocchio_robot.compute_com_rel_support_center_b(
+            dof_pos_real, dof_vel_real, base_ang_vel_b, projected_gravity[0]
+        )
+        current_obs_buffer_dict["whole_body_com_rel_support_center"] = com_rel.reshape(1, -1)
+
         return current_obs_buffer_dict
 
     def rl_inference(self, robot_state_data):
@@ -267,7 +335,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._print_observations(obs)
 
         input_feed = {"time_step": np.array([[self.curr_motion_timestep]], dtype=np.float32), "obs": obs["actor_obs"]}
-        policy_action, self.motion_command_t, self.ref_quat_xyzw_t = self.policy(input_feed)
+        (
+            policy_action,
+            self.motion_command_t,
+            self.ref_quat_xyzw_t,
+            self.reference_support_phase_t,
+            self.future_support_phase_t,
+            self.future_cmd_t,
+        ) = self.policy(input_feed)
 
         # clip policy action
         policy_action = np.clip(policy_action, -100, 100)
@@ -391,6 +466,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.curr_motion_timestep = self.timestep_util.timestep
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
+        self.reference_support_phase_t = self.reference_support_phase_0.copy()
+        self.future_support_phase_t = self.future_support_phase_0.copy()
+        self.future_cmd_t = self.future_cmd_0.copy()
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 

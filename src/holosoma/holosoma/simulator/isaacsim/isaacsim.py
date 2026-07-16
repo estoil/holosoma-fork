@@ -692,6 +692,12 @@ class IsaacSim(BaseSimulator):
             self.dof_pos_limits[i, 1] = m + 0.5 * r * self.robot_config.soft_dof_pos_limit
         return self.dof_pos_limits, self.dof_vel_limits, self.torque_limits
 
+    def get_body_masses(self) -> torch.Tensor:
+        """Per-body masses (kg) ordered like ``self.body_names`` (reindexed by ``self.body_ids``)."""
+        masses = self._robot.root_physx_view.get_masses()  # (num_envs, num_articulation_bodies)
+        masses = torch.as_tensor(masses)[0][self.body_ids]
+        return masses.to(dtype=torch.float32, device=self.device)
+
     def find_rigid_body_indice(self, body_name):
         """
         ipdb> self.simulator._robot.find_bodies("left_ankle_link")
