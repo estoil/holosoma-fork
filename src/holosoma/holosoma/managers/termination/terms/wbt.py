@@ -130,15 +130,63 @@ class BadTracking(TerminationTermBase):
 
 
 class BadTrackingZOnly(BadTracking):
-    """BadTracking variant using z-axis-only position checks for parity with BM Wo-State-Estimation."""
+    """仅使用 z 轴位置误差检查的 BadTracking 变体，与 BM 无状态估计模式保持一致。"""
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        """检查终止条件，并记录各子条件的触发率与误差。"""
+        bad_tracking = super().__call__(env, **kwargs)
+        motion_command = self.env.command_manager.get_state("motion_command")
+
+        ref_height_error = torch.abs(
+            motion_command.ref_pos_w[:, -1] - motion_command.robot_ref_pos_w[:, -1]
+        )
+        bad_ref_height = ref_height_error > self.bad_ref_pos_threshold
+
+        motion_projected_gravity_b = quat_rotate_inverse(
+            motion_command.ref_quat_w, gravity_vector(self.env), w_last=True
+        )
+        robot_projected_gravity_b = quat_rotate_inverse(
+            motion_command.robot_ref_quat_w, gravity_vector(self.env), w_last=True
+        )
+        orientation_error = torch.abs(
+            motion_projected_gravity_b[:, 2] - robot_projected_gravity_b[:, 2]
+        )
+        bad_orientation = orientation_error > self.bad_ref_ori_threshold
+
+        body_idx = self.bad_motion_body_pos_body_indexes
+        body_height_error = torch.abs(
+            motion_command.body_pos_relative_w[:, body_idx, -1]
+            - motion_command.robot_body_pos_w[:, body_idx, -1]
+        )
+        bad_body_height_per_body = body_height_error > self.bad_motion_body_pos_threshold
+        bad_body_height = torch.any(bad_body_height_per_body, dim=-1)
+
+        log_dict = self.env.log_dict
+        log_dict["termination/error_ref_height"] = ref_height_error
+        log_dict["termination/error_orientation"] = orientation_error
+        log_dict["termination/error_body_height_max"] = body_height_error.max(dim=-1).values
+        log_dict["termination/rate_ref_height"] = bad_ref_height.float()
+        log_dict["termination/rate_orientation"] = bad_orientation.float()
+        log_dict["termination/rate_body_height"] = bad_body_height.float()
+        log_dict["termination/rate_other_bad_tracking"] = (
+            bad_tracking & ~(bad_ref_height | bad_orientation | bad_body_height)
+        ).float()
+
+        for body_column, body_name in enumerate(self.bad_motion_body_pos_body_names):
+            log_dict[f"termination/error_body_height_{body_name}"] = body_height_error[:, body_column]
+            log_dict[f"termination/rate_body_height_{body_name}"] = bad_body_height_per_body[
+                :, body_column
+            ].float()
+
+        return bad_tracking
 
     def bad_ref_pos(self, motion_command: MotionCommand) -> torch.Tensor:
-        """Terminate if the reference z position is too far from the robot's z position."""
+        """参考高度与机器人高度相差过大时终止。"""
         z_err = torch.abs(motion_command.ref_pos_w[:, -1] - motion_command.robot_ref_pos_w[:, -1])
         return z_err > self.bad_ref_pos_threshold
 
     def bad_motion_body_pos(self, motion_command: MotionCommand) -> torch.Tensor:
-        """Terminate if tracked bodies have too much z-axis position error."""
+        """被跟踪刚体的高度误差过大时终止。"""
         body_idx = self.bad_motion_body_pos_body_indexes
         error = torch.abs(
             motion_command.body_pos_relative_w[:, body_idx, -1] - motion_command.robot_body_pos_w[:, body_idx, -1]

@@ -101,6 +101,9 @@ class TerminationManager:
                     f"Termination term '{term_name}' returned dtype {result.dtype}, expected torch.bool tensor."
                 )
 
+            # 记录每个终止项在全部环境中的触发比例，便于区分失败终止和超时终止。
+            self.env.log_dict[f"termination/rate_{term_name}"] = result.float()
+
             if term_cfg.is_timeout:
                 timeout_flags |= result
             else:
