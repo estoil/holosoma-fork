@@ -104,44 +104,53 @@ class FastSACEnv:
         return actor_obs, rew_buf, reset_buf, extras
 
     def _compute_action_boundaries(self) -> torch.Tensor:
-        """
-        Compute per-joint action scaling factors based on robot configuration.
-        Returns tensor of shape (num_dof,) containing the scaling factor for each joint.
+        """根据环境实际采用的逐关节缩放计算 FastSAC 动作边界。
 
-        The scaling factor is the maximum difference between default and joint limits,
-        ensuring that action=0 corresponds to default position and action=±1 reaches
-        the furthest limit from default.
+        环境最终执行 ``目标位置 = 默认位置 + 动作 * action_scales``。因此这里必须
+        使用动作管理器生成的 ``env.action_scales``，不能只使用控制配置中的标量
+        ``action_scale``；否则启用 ``effort / Kp`` 缩放后，Actor 边界和实际目标
+        位置范围会不一致。
         """
         robot_config = self._env.robot_config
 
-        # Get joint limits and default positions
+        # 读取关节限位和默认位置。
         dof_pos_lower_limits = torch.tensor(robot_config.dof_pos_lower_limit_list, device=self._env.device)
         dof_pos_upper_limits = torch.tensor(robot_config.dof_pos_upper_limit_list, device=self._env.device)
 
-        # Get default joint angles
+        # 按环境自由度顺序构造默认关节位置。
         default_joint_angles = torch.zeros(len(robot_config.dof_names), device=self._env.device)
         for i, joint_name in enumerate(robot_config.dof_names):
             if joint_name in robot_config.init_state.default_joint_angles:
                 default_joint_angles[i] = robot_config.init_state.default_joint_angles[joint_name]
 
-        # Get action scale from robot config
-        action_scale = robot_config.control.action_scale
-
-        # Compute maximum range from default to either limit for each joint
-        # This ensures symmetric scaling where action=0 -> default position
+        # 保持原有的对称动作空间：零动作对应默认位置，边界覆盖离默认位置更远的一侧。
         range_to_lower = torch.abs(dof_pos_lower_limits - default_joint_angles)
         range_to_upper = torch.abs(dof_pos_upper_limits - default_joint_angles)
         max_range = torch.maximum(range_to_lower, range_to_upper)
 
-        # Account for action_scale: the environment applies actions_scaled = actions * action_scale
-        # So our scaling factor should be: max_range / action_scale
-        action_scaling_factors = max_range / action_scale
+        action_scales = getattr(self._env, "action_scales", None)
+        if action_scales is None:
+            raise RuntimeError("FastSAC 需要环境公开逐关节 action_scales，当前环境未提供该属性。")
+        action_scales = torch.as_tensor(action_scales, device=self._env.device, dtype=max_range.dtype).reshape(-1)
+        if action_scales.shape != max_range.shape:
+            raise ValueError(
+                f"action_scales 形状错误：期望 {tuple(max_range.shape)}，实际 {tuple(action_scales.shape)}。"
+            )
+        invalid_scales = ~torch.isfinite(action_scales) | (action_scales <= 0.0)
+        if torch.any(invalid_scales):
+            invalid_names = [
+                robot_config.dof_names[i]
+                for i in torch.nonzero(invalid_scales, as_tuple=False).flatten().detach().cpu().tolist()
+            ]
+            raise ValueError(f"FastSAC 要求所有逐关节 action_scales 为有限正数，无效关节：{invalid_names}")
 
-        logger.info(f"Computed action scaling factors for {len(robot_config.dof_names)} DOFs")
-        logger.info(f"Action scale: {action_scale}")
-        logger.info(f"Scaling: {action_scaling_factors}")
+        action_boundaries = max_range / action_scales
 
-        return action_scaling_factors
+        logger.info(f"已为 {len(robot_config.dof_names)} 个自由度计算 FastSAC 动作边界")
+        logger.info(f"环境逐关节动作缩放：{action_scales}")
+        logger.info(f"FastSAC 动作边界：{action_boundaries}")
+
+        return action_boundaries
 
 
 class FastSACAgent(BaseAlgo):
