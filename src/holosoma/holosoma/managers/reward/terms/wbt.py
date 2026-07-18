@@ -331,22 +331,37 @@ class ReferenceSupportContactMismatchPenalty(RewardTermBase):
 
 
 # ================================================================================================
-# Balance rewards (xCoM / support-polygon margin / time-to-boundary) + single-support no-slip
-# Ported from whole_body_tracking (logic identical; param VALUES set in config). holosoma exposes
-# no whole-body CoM, so it is computed from per-body world pos/vel weighted by per-body masses
-# (masses fetched once via simulator.get_body_masses()).
+# 平衡奖励：xCoM、支撑多边形边界、到达边界时间以及单脚支撑防滑。
+# 逻辑移植自 whole_body_tracking，参数值由配置文件指定。
+# holosoma 未直接提供全身质心，因此使用各刚体的位置、速度和质量加权计算。
 # ================================================================================================
 
 _FOOT_BODY_NAMES = ("left_ankle_roll_link", "right_ankle_roll_link")
-# G1 foot support rectangle: corners in the ankle body frame (x, y, z); both feet share it.
-# X2 WBT currently reuses this same polygon (see config_values/wbt/x2/reward.py); retune if X2
-# foot_contact_point spheres make support margins look systematically off.
+# 脚部支撑矩形使用踝关节滚转刚体坐标系：x 为前后方向，y 为左右方向，z 为脚底高度。
 _G1_FOOT_SUPPORT_POLYGON = (
     (-0.05, -0.025, -0.03),
     (0.12, -0.030, -0.03),
     (0.12, 0.030, -0.03),
     (-0.05, 0.025, -0.03),
 )
+# X2 支撑范围取自 x2_31dof.xml 中脚底碰撞球的外包络：
+#   球心范围：x=[-0.065, 0.139]，y=[-0.060, 0.060]，半径=0.005
+#   踝关节滚转刚体坐标系中的脚底高度：z=-0.073
+_X2_FOOT_SUPPORT_POLYGON = (
+    (-0.070, -0.065, -0.073),
+    (0.144, -0.065, -0.073),
+    (0.144, 0.065, -0.073),
+    (-0.070, 0.065, -0.073),
+)
+
+
+def _default_foot_support_polygon(env):
+    """根据机器人型号选择支撑多边形，同时保持 G1 的原有行为。"""
+    asset = getattr(getattr(env, "robot_config", None), "asset", None)
+    robot_type = str(getattr(asset, "robot_type", "")).lower()
+    if robot_type.startswith("x2"):
+        return _X2_FOOT_SUPPORT_POLYGON
+    return _G1_FOOT_SUPPORT_POLYGON
 
 
 def _resolve_foot_body_indexes(env) -> torch.Tensor:
@@ -474,7 +489,7 @@ class SupportXcomPolygonMarginPenalty(RewardTermBase):
         self.max_penalty = p.get("max_penalty", 0.04)
         self.penalty_power = p.get("penalty_power", 2.0)  # 1=线性 hinge, 2=平方(原行为)
         self.polygon_b = torch.tensor(
-            p.get("foot_polygon", _G1_FOOT_SUPPORT_POLYGON), dtype=torch.float32, device=env.device
+            p.get("foot_polygon", _default_foot_support_polygon(env)), dtype=torch.float32, device=env.device
         )
 
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
@@ -519,7 +534,7 @@ class XcomTtbPenalty(RewardTermBase):
         self.com_height_floor = p.get("com_height_floor", 0.25)
         self.max_penalty = p.get("max_penalty", 0.09)
         self.polygon_b = torch.tensor(
-            p.get("foot_polygon", _G1_FOOT_SUPPORT_POLYGON), dtype=torch.float32, device=env.device
+            p.get("foot_polygon", _default_foot_support_polygon(env)), dtype=torch.float32, device=env.device
         )
 
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:

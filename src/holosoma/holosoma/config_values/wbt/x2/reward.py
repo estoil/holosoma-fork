@@ -1,8 +1,7 @@
-"""Whole Body Tracking reward presets for the X2 robot (31 DoF + OBD balance).
+"""X2 机器人全身动作跟踪奖励预设，包含 31 个自由度和 OBD 平衡奖励。
 
-Foot support polygon: currently reuses the G1 ankle-frame rectangle constants inside
-``managers/reward/terms/wbt.py`` (_G1_FOOT_SUPPORT_POLYGON). X2 sole collision uses
-``foot_contact_point`` spheres; if margins look off, retune the polygon corners for X2.
+平衡奖励根据 ``robot_config.asset.robot_type``，从
+``managers/reward/terms/wbt.py`` 中选择 X2 踝关节坐标系下的支撑多边形。
 """
 
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
