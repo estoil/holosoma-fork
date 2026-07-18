@@ -208,7 +208,8 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
 
         # Step 3: Handle wandb upload if requested
         if wandb_logging and _is_wandb_available():
-            wandb.log({"Training rollout": wandb.Video(str(final_video), format="mp4")})
+            # Pass fps explicitly so W&B does not re-interpret short clips.
+            wandb.log({"Training rollout": wandb.Video(str(final_video), fps=int(round(fps)), format="mp4")})
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

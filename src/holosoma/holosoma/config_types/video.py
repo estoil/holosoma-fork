@@ -106,6 +106,17 @@ class VideoConfig:
         1.0 = real-time, 2.0 = 2x faster, 0.5 = slow motion.
     """
 
+    min_duration_s: float = -1.0
+    """Minimum recorded simulation time in seconds for each training rollout clip.
+
+    Early terminations used to stop encoding at episode end, so failing policies
+    produced sub-second videos. When this is > 0, recording continues across
+    env resets until the target duration is reached.
+    -1: use simulator ``max_episode_length_s`` (default).
+    0: legacy per-episode clips (stop on every episode end).
+    >0: explicit duration in simulation seconds.
+    """
+
     output_format: str = "h264"
     """Video output format ('mp4' or 'h264'). 'h264' provides better browser compatibility."""
 

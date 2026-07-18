@@ -76,6 +76,7 @@ class VideoRecorderInterface(ABC):
         self.simulator = simulator
         self._is_recording = False
         self._manual_recording = False
+        self._span_resets = False
         self._current_episode = 0
         self._total_episodes = 0
 
@@ -175,6 +176,7 @@ class VideoRecorderInterface(ABC):
     def discard_recording(self) -> None:
         """丢弃当前录制缓冲，不编码、不写文件。"""
         self._is_recording = False
+        self._span_resets = False
         self._clear_frame_buffer()
         self._frame_times.clear()
 
@@ -183,12 +185,49 @@ class VideoRecorderInterface(ABC):
         if self._is_recording:
             self.discard_recording()
         self._manual_recording = True
+        self._span_resets = False
         self._current_episode = episode_id
         self.start_recording(episode_id)
 
     def stop_manual_recording(self) -> None:
         """结束手动连续录像，并把当前缓冲写成视频文件。"""
         self._manual_recording = False
+        self._span_resets = False
+        self.stop_recording()
+
+    def _control_frequency(self) -> float:
+        """Return control-step frequency (Hz) used for frame capture and duration."""
+        sim_config = self.simulator.simulator_config.sim
+        return float(sim_config.fps) / float(sim_config.control_decimation)
+
+    def _resolve_min_duration_s(self) -> float:
+        """Resolve configured minimum clip duration in simulation seconds."""
+        if self.config.min_duration_s == 0:
+            return 0.0
+        if self.config.min_duration_s > 0:
+            return float(self.config.min_duration_s)
+        return float(self.simulator.simulator_config.sim.max_episode_length_s)
+
+    def _recorded_duration_s(self) -> float:
+        """Return buffered clip length in simulation seconds."""
+        control_freq = self._control_frequency()
+        if control_freq <= 0:
+            return 0.0
+        # Prefer frame-counter based duration so threaded capture (async buffer)
+        # still stops at the correct wall-clock simulation time.
+        control_decimation = max(int(self.simulator.simulator_config.sim.control_decimation), 1)
+        n_frames = self._frame_counter // control_decimation
+        if self.video_frames:
+            n_frames = max(n_frames, len(self.video_frames))
+        return n_frames / control_freq
+
+    def _maybe_stop_span_recording(self) -> None:
+        """Stop a span-across-resets clip once the minimum duration is reached."""
+        if not self._span_resets or not self._is_recording:
+            return
+        if self._recorded_duration_s() < self._resolve_min_duration_s():
+            return
+        self._span_resets = False
         self.stop_recording()
 
     def capture_frame(self, env_id: int = 0) -> None:
@@ -228,6 +267,10 @@ class VideoRecorderInterface(ABC):
             self._capture_frame_impl()
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._frame_times.append(elapsed_ms)
+
+        # For multi-reset clips, finalize as soon as the target duration is reached
+        # (including mid-episode) so videos are not left open indefinitely.
+        self._maybe_stop_span_recording()
 
     @abstractmethod
     def _capture_frame_impl(self) -> None:
@@ -297,6 +340,7 @@ class VideoRecorderInterface(ABC):
 
         # Clear recording state - this method now owns the recording flag
         self._is_recording = False
+        self._span_resets = False
         self._stop_recording()
 
     def cleanup(self) -> None:
@@ -359,11 +403,16 @@ class VideoRecorderInterface(ABC):
         if env_id != self.config.record_env_id:
             return
 
-        # Increment total episode count (across all environments)
+        # Increment total episode count (for the recording env)
         self._total_episodes += 1
+
+        # Continue an in-progress multi-reset clip without clearing the buffer
+        if self._is_recording and self._span_resets:
+            return
 
         if self.should_record_episode(self._total_episodes):
             self._current_episode = self._total_episodes
+            self._span_resets = self._resolve_min_duration_s() > 0
             self.start_recording(self._total_episodes)
 
     def on_episode_end(self, env_id: int) -> None:
@@ -378,6 +427,12 @@ class VideoRecorderInterface(ABC):
         # Only stop for the specified environment
         if env_id != self.config.record_env_id:
             return
+
+        # Keep recording through early terminations until min duration is reached
+        if self._span_resets and self._is_recording:
+            if self._recorded_duration_s() < self._resolve_min_duration_s():
+                return
+            self._span_resets = False
 
         # Let stop_recording() handle the recording state check
         self.stop_recording()
@@ -456,9 +511,7 @@ class VideoRecorderInterface(ABC):
             # Calculate actual video FPS based on control frequency and playback rate
             # Frames are captured at control_frequency = sim_fps / control_decimation
             # To achieve desired playback rate: actual_fps = control_frequency * playback_rate
-            sim_config = self.simulator.simulator_config.sim
-            control_frequency = sim_config.fps / sim_config.control_decimation
-            display_fps = control_frequency * self.config.playback_rate
+            display_fps = self._control_frequency() * self.config.playback_rate
 
             # Get save directory
             save_dir = self._get_save_directory()
