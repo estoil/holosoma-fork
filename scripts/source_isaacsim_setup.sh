@@ -10,5 +10,13 @@ CONDA_ENV_NAME=${CONDA_ENV_NAME:-hssim}
 echo "conda environment name is set to: $CONDA_ENV_NAME"
 
 source ${SCRIPT_DIR}/source_common.sh
-source ${CONDA_ROOT}/bin/activate $CONDA_ENV_NAME
+if [ -f "${CONDA_ROOT}/bin/activate" ]; then
+    source "${CONDA_ROOT}/bin/activate" "$CONDA_ENV_NAME"
+elif [ -f "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}/bin/activate" ]; then
+    # Offline conda-pack bundles may contain only the requested environment.
+    source "${CONDA_ROOT}/envs/${CONDA_ENV_NAME}/bin/activate"
+else
+    echo "Conda environment not found: ${CONDA_ROOT}/envs/${CONDA_ENV_NAME}" >&2
+    return 1 2>/dev/null || exit 1
+fi
 export OMNI_KIT_ACCEPT_EULA=1
