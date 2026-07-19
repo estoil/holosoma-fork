@@ -38,18 +38,6 @@ x2_31dof_wbt_reward = RewardManagerCfg(
             params={"sigma": 3.14},
             weight=1.0,
         ),
-        # Optional ZMP (same as G1 WBT); OBD five balance penalties remain the primary stack.
-        "zmp_support_region_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:ZMPSupportRegionReward",
-            params={
-                "contact_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
-                "sigma": 0.05,
-                "support_margin": 0.04,
-                "vertical_force_threshold": 1.0,
-                "debug_log_interval": 200,
-            },
-            weight=0.5,
-        ),
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
             weight=-0.1,
