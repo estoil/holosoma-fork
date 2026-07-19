@@ -212,6 +212,24 @@ class ActionManager:
         for term in self._term_instances.values():
             term.reset(env_ids=env_ids)
 
+    def initialize_actions(self, env_ids: torch.Tensor, actions: torch.Tensor) -> None:
+        """用指定动作初始化重置环境的动作历史和各动作项。"""
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1)
+        actions = torch.as_tensor(actions, device=self.device, dtype=self._action.dtype)
+        expected_shape = (env_ids.numel(), self._total_action_dim)
+        if actions.shape != expected_shape:
+            raise ValueError(f"初始化动作形状错误：期望 {expected_shape}，实际 {tuple(actions.shape)}。")
+
+        self._action[env_ids] = actions
+        self._prev_action[env_ids] = actions
+
+        idx = 0
+        for term_name in self._term_names:
+            term = self._term_instances[term_name]
+            term_actions = actions[:, idx : idx + term.action_dim]
+            term.initialize_actions(env_ids, term_actions)
+            idx += term.action_dim
+
     def get_term(self, name: str) -> ActionTermBase:
         """Get action term by name.
 

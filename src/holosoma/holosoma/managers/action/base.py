@@ -143,3 +143,10 @@ class ActionTermBase(ABC):
                 self._raw_actions[env_ids] = 0.0
             if self._processed_actions is not None:
                 self._processed_actions[env_ids] = 0.0
+
+    def initialize_actions(self, env_ids: torch.Tensor, actions: torch.Tensor) -> None:
+        """用指定动作初始化重置环境的动作缓冲区。"""
+        if self._raw_actions is not None:
+            self._raw_actions[env_ids] = actions
+        if self._processed_actions is not None:
+            self._processed_actions[env_ids] = actions

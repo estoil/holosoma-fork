@@ -120,7 +120,7 @@ x2_31dof_wbt_fast_sac_reward = RewardManagerCfg(
         **x2_31dof_wbt_reward.terms,
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
-            weight=-1.0,
+            weight=-0.1,
         ),
         "motion_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_global_ref_position_error_exp",

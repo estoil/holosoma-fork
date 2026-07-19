@@ -240,6 +240,23 @@ class JointPositionActionTerm(ActionTermBase):
         else:
             self._prev_dof_vel[env_ids] = 0.0
 
+    def initialize_actions(self, env_ids: torch.Tensor, actions: torch.Tensor) -> None:
+        """用保持重置姿态的动作填充控制器及延迟缓冲区。"""
+        assert self._raw_actions is not None
+        assert self._processed_actions is not None
+
+        self._raw_actions[env_ids] = actions
+        if self.env.robot_config.control.clip_actions:
+            clip_limit = self.env.robot_config.control.action_clip_value
+            initialized_actions = torch.clip(actions, -clip_limit, clip_limit)
+        else:
+            initialized_actions = actions
+
+        self._processed_actions[env_ids] = initialized_actions
+        self._actions_after_delay[env_ids] = initialized_actions
+        if self.action_queue is not None:
+            self.action_queue[env_ids] = initialized_actions.unsqueeze(1)
+
     # ------------------------------------------------------------------
     # Hooks for randomization manager
 

@@ -196,12 +196,12 @@ class VideoRecorderInterface(ABC):
         self.stop_recording()
 
     def _control_frequency(self) -> float:
-        """Return control-step frequency (Hz) used for frame capture and duration."""
+        """返回用于采帧和计算时长的控制频率，单位为赫兹。"""
         sim_config = self.simulator.simulator_config.sim
         return float(sim_config.fps) / float(sim_config.control_decimation)
 
     def _resolve_min_duration_s(self) -> float:
-        """Resolve configured minimum clip duration in simulation seconds."""
+        """解析配置中的最短视频仿真时长。"""
         if self.config.min_duration_s == 0:
             return 0.0
         if self.config.min_duration_s > 0:
@@ -209,12 +209,11 @@ class VideoRecorderInterface(ABC):
         return float(self.simulator.simulator_config.sim.max_episode_length_s)
 
     def _recorded_duration_s(self) -> float:
-        """Return buffered clip length in simulation seconds."""
+        """返回缓冲区内视频对应的仿真时长。"""
         control_freq = self._control_frequency()
         if control_freq <= 0:
             return 0.0
-        # Prefer frame-counter based duration so threaded capture (async buffer)
-        # still stops at the correct wall-clock simulation time.
+        # 优先使用帧计数器计算时长，确保异步采帧也能在正确的仿真时刻停止。
         control_decimation = max(int(self.simulator.simulator_config.sim.control_decimation), 1)
         n_frames = self._frame_counter // control_decimation
         if self.video_frames:
@@ -222,7 +221,7 @@ class VideoRecorderInterface(ABC):
         return n_frames / control_freq
 
     def _maybe_stop_span_recording(self) -> None:
-        """Stop a span-across-resets clip once the minimum duration is reached."""
+        """跨重置视频达到最短时长后停止录制。"""
         if not self._span_resets or not self._is_recording:
             return
         if self._recorded_duration_s() < self._resolve_min_duration_s():
@@ -268,8 +267,7 @@ class VideoRecorderInterface(ABC):
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._frame_times.append(elapsed_ms)
 
-        # For multi-reset clips, finalize as soon as the target duration is reached
-        # (including mid-episode) so videos are not left open indefinitely.
+        # 跨重置视频达到目标时长后立即结束，包括 episode 尚未结束的情况。
         self._maybe_stop_span_recording()
 
     @abstractmethod
@@ -403,10 +401,10 @@ class VideoRecorderInterface(ABC):
         if env_id != self.config.record_env_id:
             return
 
-        # Increment total episode count (for the recording env)
+        # 只统计录制环境的 episode 数量。
         self._total_episodes += 1
 
-        # Continue an in-progress multi-reset clip without clearing the buffer
+        # 跨重置视频尚未完成时继续录制，不清空缓冲区。
         if self._is_recording and self._span_resets:
             return
 
@@ -428,7 +426,7 @@ class VideoRecorderInterface(ABC):
         if env_id != self.config.record_env_id:
             return
 
-        # Keep recording through early terminations until min duration is reached
+        # 提前终止时继续录制，直到达到最短时长。
         if self._span_resets and self._is_recording:
             if self._recorded_duration_s() < self._resolve_min_duration_s():
                 return

@@ -21,7 +21,7 @@ x2_31dof = ExperimentConfig(
     algo=replace(algo.ppo, config=replace(algo.ppo.config, num_learning_iterations=25000, use_symmetry=True)),
     simulator=simulator.isaacgym,
     robot=robot.x2_31dof,
-    terrain=terrain.terrain_locomotion_mix,
+    terrain=terrain.terrain_locomotion_mix,#地形
     observation=observation.x2_31dof_loco_single_wolinvel,
     action=action.x2_31dof_joint_pos,
     termination=termination.x2_31dof_termination,

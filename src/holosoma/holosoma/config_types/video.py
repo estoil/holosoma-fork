@@ -107,14 +107,13 @@ class VideoConfig:
     """
 
     min_duration_s: float = -1.0
-    """Minimum recorded simulation time in seconds for each training rollout clip.
+    """每段训练 rollout 视频至少记录的仿真时长，单位为秒。
 
-    Early terminations used to stop encoding at episode end, so failing policies
-    produced sub-second videos. When this is > 0, recording continues across
-    env resets until the target duration is reached.
-    -1: use simulator ``max_episode_length_s`` (default).
-    0: legacy per-episode clips (stop on every episode end).
-    >0: explicit duration in simulation seconds.
+    过去提前终止会在 episode 结束时停止编码，导致失败策略的视频不足一秒。
+    当该值大于 0 时，录制会跨越环境重置，直到达到目标时长。
+    -1：使用仿真器的 ``max_episode_length_s``（默认）。
+    0：沿用按 episode 录制的旧行为，每次 episode 结束都停止。
+    大于 0：显式指定仿真时长。
     """
 
     output_format: str = "h264"

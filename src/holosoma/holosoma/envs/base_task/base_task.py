@@ -223,7 +223,11 @@ class BaseTask:
         self.simulator.set_actor_root_state_tensor_robots(env_ids, self.simulator.robot_root_states)
         self.simulator.set_dof_state_tensor_robots(env_ids, self.simulator.dof_state)
 
-        actions = torch.zeros(self.num_envs, self.dim_actions, device=self.device, requires_grad=False)
+        if self.action_manager is None:
+            actions = torch.zeros(self.num_envs, self.dim_actions, device=self.device, requires_grad=False)
+        else:
+            # WBT 可在 reset 后提供保持参考姿态的初始化动作；其他任务仍默认为零动作。
+            actions = self.action_manager.action.detach().clone()
         actor_state = {}
         actor_state["actions"] = actions
         obs_dict, _, _, _ = self.step(actor_state)

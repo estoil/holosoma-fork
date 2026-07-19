@@ -103,6 +103,25 @@ class WholeBodyTrackingManager(BaseTask):
         motion_command.init_buffers()
         return super().reset_all()
 
+    def reset_envs_idx(self, env_ids, target_states=None, target_buf=None):
+        """重置环境，并用保持当前参考姿态的等效动作初始化动作缓存。"""
+        super().reset_envs_idx(env_ids, target_states, target_buf)
+        if self.action_manager is None or len(env_ids) == 0:
+            return
+
+        env_ids = self._ensure_long_tensor(env_ids)
+        action_scales = torch.as_tensor(self.action_scales, device=self.device).reshape(-1)
+        if torch.any(~torch.isfinite(action_scales) | (action_scales <= 0.0)):
+            raise ValueError("WBT 重置动作要求所有逐关节 action_scales 均为有限正数。")
+
+        motion_command = self.command_manager.get_state("motion_command")
+        reference_dof_pos = motion_command.joint_pos[env_ids]
+        reset_actions = (reference_dof_pos - self.default_dof_pos[env_ids]) / action_scales
+        if self.robot_config.control.clip_actions:
+            clip_limit = self.robot_config.control.action_clip_value
+            reset_actions = torch.clip(reset_actions, -clip_limit, clip_limit)
+        self.action_manager.initialize_actions(env_ids, reset_actions)
+
     def _reset_robot_states_callback(self, env_ids, target_states=None):
         # TODO(jchen): Now,reset robot/object states is implemented in command/terms/wbt.MotionCommand.reset
         # discuss whether to move to here in the future.

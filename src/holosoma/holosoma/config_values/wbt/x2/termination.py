@@ -1,4 +1,4 @@
-"""Whole Body Tracking termination presets for the X2 robot."""
+"""X2 机器人全身动作跟踪终止条件预设。"""
 
 from holosoma.config_types.termination import TerminationManagerCfg, TerminationTermCfg
 
@@ -33,8 +33,6 @@ x2_31dof_wbt_termination = TerminationManagerCfg(
                 "bad_motion_body_pos_body_names": [
                     "left_ankle_roll_link",
                     "right_ankle_roll_link",
-                    "left_wrist_yaw_link",
-                    "right_wrist_yaw_link",
                 ],
                 "bad_object_pos_threshold": 0.25,
                 "bad_object_ori_threshold": 0.8,
