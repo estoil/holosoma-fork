@@ -28,6 +28,16 @@ x2_31dof_wbt_reward = RewardManagerCfg(
             params={"sigma": 0.4},
             weight=1.0,
         ),
+        # 脚踝高度单独跟踪：与 BadTrackingZOnly 同口径，打破 14-body 平均对终止量的稀释。
+        # 不启用全关节 q 跟踪：BeyondMimic/WBT 原设计为 task-space；全关节等权 mean 会被手臂稀释且与 body 双重计数。
+        "motion_ankle_height_tracking_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:MotionAnkleHeightTrackingExp",
+            params={
+                "sigma": 0.08,
+                "body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+            },
+            weight=2.0,
+        ),
         "motion_global_body_lin_vel": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
             params={"sigma": 1.0},
@@ -38,13 +48,27 @@ x2_31dof_wbt_reward = RewardManagerCfg(
             params={"sigma": 3.14},
             weight=1.0,
         ),
+        # # Optional ZMP (same as G1 WBT); OBD five balance penalties remain the primary stack.
+        # "zmp_support_region_exp": RewardTermCfg(
+        #     func="holosoma.managers.reward.terms.wbt:ZMPSupportRegionReward",
+        #     params={
+        #         "contact_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+        #         "sigma": 0.05,
+        #         "support_margin": 0.04,
+        #         "vertical_force_threshold": 1.0,
+        #         "debug_log_interval": 200,
+        #     },
+        #     weight=0.5,
+        # ),
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
             weight=-0.1,
         ),
+        # soft=1.0：只罚越过硬限位。AMS 极限保持段参考姿态常贴/越 soft=0.9 边界，
+        # 完美跟踪仍会被重罚，导致学到 hold 后崩溃。
         "limits_dof_pos": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:limits_dof_pos",
-            params={"soft_dof_pos_limit": 0.9},
+            params={"soft_dof_pos_limit": 1.0},
             weight=-10.0,
         ),
         # X2 body names: allow foot_contact_point / ankle_roll / wrist contacts.

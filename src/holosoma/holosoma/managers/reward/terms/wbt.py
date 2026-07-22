@@ -109,6 +109,67 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
+def motion_joint_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+    """全关节角跟踪（可选工具函数，默认配置不启用）。
+
+    BeyondMimic/WBT 主奖励是 task-space 刚体跟踪；全关节等权 mean 易被手臂稀释，
+    且与 body 奖励双重计数，一般不应当作主补丁。需要时再在配置中显式打开。
+    """
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.mean(torch.square(motion_command.joint_pos - motion_command.robot_joint_pos), dim=-1)
+    return torch.exp(-error / sigma**2)
+
+
+class MotionAnkleHeightTrackingExp(RewardTermBase):
+    """单独奖励脚踝高度跟踪，避免被全身刚体平均稀释。
+
+    误差口径与 ``BadTrackingZOnly`` 一致：比较 ``body_pos_relative_w`` 与机器人
+    刚体世界系 Z。默认监控左右 ``ankle_roll_link``。
+
+    注意：``RewardManager`` 在 ``CommandManager`` 之前初始化，因此脚踝在
+    ``body_names_to_track`` 中的索引必须延迟到首次计算奖励时再解析。
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.sigma = float(cfg.params.get("sigma", 0.08))
+        self.body_names = list(
+            cfg.params.get(
+                "body_names",
+                ("left_ankle_roll_link", "right_ankle_roll_link"),
+            )
+        )
+        self.body_indexes: torch.Tensor | None = None
+
+    def _ensure_body_indexes(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        if self.body_indexes is not None:
+            return self.body_indexes
+        motion_command = _get_motion_command_and_assert_type(env)
+        tracked = list(motion_command.motion_cfg.body_names_to_track)
+        missing = [n for n in self.body_names if n not in tracked]
+        assert not missing, f"脚踝高度奖励所需刚体不在 body_names_to_track 中: {missing}"
+        self.body_indexes = torch.tensor(
+            [tracked.index(n) for n in self.body_names],
+            dtype=torch.long,
+            device=env.device,
+        )
+        return self.body_indexes
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        body_indexes = self._ensure_body_indexes(env)
+        z_err = (
+            motion_command.body_pos_relative_w[:, body_indexes, -1]
+            - motion_command.robot_body_pos_w[:, body_indexes, -1]
+        )
+        error = torch.mean(torch.square(z_err), dim=-1)
+        return torch.exp(-error / self.sigma**2)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+
 #新增ZMP设计
 class ZMPSupportRegionReward(RewardTermBase):
     """基于 ZMP 是否落在脚底支撑区域附近的稳定性奖励。"""

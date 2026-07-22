@@ -33,7 +33,7 @@ motion_config = MotionConfig(
     ],
     body_name_ref=["torso_link"],
     use_adaptive_timesteps_sampler=False,
-    start_at_timestep_zero_prob=1.0,
+    start_at_timestep_zero_prob=0.2,
     noise_to_initial_pose=init_pose_config,
 )
 
