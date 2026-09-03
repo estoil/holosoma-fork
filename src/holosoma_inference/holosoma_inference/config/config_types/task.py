@@ -120,11 +120,28 @@ class TaskConfig:
     motion_end_timestep: int | None = None
     """Ending timestep for motion clip playback. If None, plays until the end."""
 
+    auto_start_policy: bool = False
+    """Activate policy control immediately after initialization."""
+
+    auto_start_motion_clip: bool = False
+    """Start WBT motion playback together with automatic policy activation."""
+
+    motion_state_handshake: bool = False
+    """Send a zero-torque handshake before synchronized motion-state simulation starts."""
+
     debug: DebugConfig = DebugConfig()
     """Debug overrides for quick testing."""
 
     def __post_init__(self):
         """Resolve use_keyboard/use_joystick/use_usb_joystick shortcuts into velocity_input/state_input."""
+        if self.auto_start_motion_clip and not self.auto_start_policy:
+            raise ValueError("--task.auto-start-motion-clip requires --task.auto-start-policy")
+        if self.motion_state_handshake and not (self.auto_start_policy and self.auto_start_motion_clip):
+            raise ValueError(
+                "--task.motion-state-handshake requires --task.auto-start-policy "
+                "and --task.auto-start-motion-clip"
+            )
+
         active_shortcuts = [
             name
             for name, enabled in (

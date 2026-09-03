@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------------------------------
+# Modified from the Holosoma framework (Amazon FAR): https://github.com/amazon-far/holosoma
+# Copyright Amazon.com, Inc. or its affiliates. Licensed under the Apache License, Version 2.0.
+# This file was CHANGED for DDC: it carries the deployable support-relative dynamic-CoM observation
+# and/or the human-science balance reward library and its config (see training/TRAINING.md).
+# The Apache-2.0 license text is in the repository LICENSE; attribution is in training/NOTICE.
+# ---------------------------------------------------------------------------------------------------
+
 """Whole body tracking observation terms."""
 
 from __future__ import annotations
@@ -183,6 +191,15 @@ def future_cmd(env: WholeBodyTrackingManager, num_future_frames: int = 10) -> to
     return torch.cat(frames, dim=-1)
 
 
+# Dynamic vs static CoM: the actor and critic independently control whether the xCoM uses the
+# velocity-extrapolation term. True = dynamic (xCoM = CoM + velocity extrapolation, capture-point/LIP);
+# False = static (pure geometric CoM, drops the velocity term). The two flags are independent, so the
+# actor observation can be varied without changing the critic. (The polygon / xcom_ttb rewards are not
+# controlled by these flags -- they always use the dynamic term.)
+ACTOR_XCOM_USE_VELOCITY = True   # controls the actor whole_body_com_rel_support_center (deployable); False -> return position only (N,2)
+CRITIC_XCOM_USE_VELOCITY = True  # controls the critic whole_body_xcom_rel_support_center (privileged / training-only)
+
+
 def whole_body_xcom_rel_support_center(
     env: WholeBodyTrackingManager,
     threshold: float = 1.0,
@@ -211,7 +228,7 @@ def whole_body_xcom_rel_support_center(
         env._wb_body_masses_cache = masses
         env._wb_total_mass_cache = masses.sum().clamp_min(1e-6)
     com_pos, com_vel = _whole_body_com_state(env, masses, env._wb_total_mass_cache)
-    xcom_xy = _xcom_xy(com_pos, com_vel, gravity, com_height_floor)
+    xcom_xy = _xcom_xy(com_pos, com_vel, gravity, com_height_floor, use_velocity=CRITIC_XCOM_USE_VELOCITY)
 
     foot_xy = env.simulator._rigid_body_pos[:, foot_ids, :2]  # (N, 2, 2)
     support_mask = _support_contact_mask(env, foot_ids, threshold)  # (N, 2) bool
@@ -262,16 +279,22 @@ def whole_body_com_rel_support_center(
     wsum = w.sum(dim=1).clamp_min(1.0)
     has_support = torch.any(support_mask, dim=1, keepdim=True)
     center_pos = torch.where(has_support, (foot_pos * w).sum(dim=1) / wsum, foot_pos.mean(dim=1))
-    center_vel = torch.where(has_support, (foot_vel * w).sum(dim=1) / wsum, foot_vel.mean(dim=1))
+
+    rel_pos_w = torch.zeros((env.num_envs, 3), device=com_pos.device, dtype=com_pos.dtype)
+    rel_pos_w[:, :2] = com_pos[:, :2] - center_pos
+    pos_b = quat_rotate_inverse(_base_quat(env), rel_pos_w, w_last=True)[:, :2]
+
+    # ACTOR_XCOM_USE_VELOCITY=False -> return only the CoM-rel-support position (N,2), dropping the
+    # dynamic relative-velocity term below.
+    if not ACTOR_XCOM_USE_VELOCITY:
+        return pos_b  # (N, 2): static CoM position (base frame)
 
     # Direct relative velocity (CoM - support center): base LINEAR velocity cancels in the difference,
     # so deployable from encoders+IMU (no base-vel estimate). No buffer -> immune to the obs-runs-twice
     # bug. During stance (foot ~stationary) it ~= world CoM velocity = the xCoM/capture-point velocity term.
-    rel_pos_w = torch.zeros((env.num_envs, 3), device=com_pos.device, dtype=com_pos.dtype)
-    rel_pos_w[:, :2] = com_pos[:, :2] - center_pos
+    center_vel = torch.where(has_support, (foot_vel * w).sum(dim=1) / wsum, foot_vel.mean(dim=1))
     rel_vel_w = torch.zeros((env.num_envs, 3), device=com_vel.device, dtype=com_vel.dtype)
     rel_vel_w[:, :2] = com_vel[:, :2] - center_vel
-    pos_b = quat_rotate_inverse(_base_quat(env), rel_pos_w, w_last=True)[:, :2]
     vel_b = quat_rotate_inverse(_base_quat(env), rel_vel_w, w_last=True)[:, :2]
     return torch.cat([pos_b, vel_b], dim=-1)  # (N, 4): [CoM-rel-support position, relative velocity], base frame
 

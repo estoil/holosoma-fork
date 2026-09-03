@@ -81,3 +81,23 @@ class RunSimConfig:
     device: str | None = "cpu"
     """Device to use for simulation. None auto-detects based on the simulator type.
     """
+
+    motion_state_file: str = ""
+    """Optional Holosoma motion NPZ used to initialize the complete robot state.
+
+    When set, direct simulation stays physically paused at the selected reference
+    state while publishing low-state/clock messages. Physics starts only after an
+    active policy command is received through the bridge.
+    """
+
+    motion_state_timestep: int = 0
+    """Reference timestep loaded from ``motion_state_file``."""
+
+    wait_for_policy_command: bool = True
+    """Wait for a non-zero-gain DDS command before advancing physics."""
+
+    policy_wait_timeout_s: float = 120.0
+    """Seconds to wait for a policy command. Values <= 0 wait indefinitely."""
+
+    disable_gantry_on_motion_start: bool = True
+    """Disable the virtual gantry immediately before motion-state physics starts."""

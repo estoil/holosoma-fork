@@ -7,6 +7,29 @@ Tests focus on timing logic for MotionClockUtil and TimestepUtil classes.
 from unittest import mock
 
 from holosoma_inference.policies.wbt_utils import MotionClockUtil, TimestepUtil
+from holosoma_inference.policies.wbt import reference_pose_action
+
+
+def test_reference_pose_action_reconstructs_reference_target():
+    """The reset action must reconstruct the same PD target used in training."""
+    import numpy as np
+
+    reference = np.array([[0.3, -0.4, 0.9]], dtype=np.float32)
+    default = np.array([0.1, -0.1, 0.5], dtype=np.float32)
+    scales = np.array([[0.2, 0.3, 0.4]], dtype=np.float32)
+
+    action = reference_pose_action(reference, default, scales)
+
+    np.testing.assert_allclose(default + action * scales, reference, atol=1e-7)
+
+
+def test_reference_pose_action_rejects_invalid_scale():
+    """Invalid scales must fail instead of silently corrupting the observation."""
+    import numpy as np
+    import pytest
+
+    with pytest.raises(ValueError, match="finite positive"):
+        reference_pose_action(np.ones((1, 2)), np.zeros(2), np.array([0.2, 0.0]))
 
 
 class TestMotionClockUtil:

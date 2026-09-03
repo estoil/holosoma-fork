@@ -45,7 +45,7 @@ isaacsim = dataclasses.replace(
     ),
 )
 
-# MuJoCo with sim2sim optimizations
+# MuJoCo at the same physics/control cadence used during WBT training.
 mujoco = dataclasses.replace(
     holosoma.config_values.simulator.mujoco,
     config=dataclasses.replace(
@@ -54,7 +54,7 @@ mujoco = dataclasses.replace(
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mujoco.config.sim,
-            fps=2000,  # mujoco can run faster
+            fps=200,  # 200 Hz physics / 50 Hz policy = four physics steps per action
         ),
     ),
 )
@@ -68,7 +68,7 @@ mjwarp = dataclasses.replace(
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mjwarp.config.sim,
-            fps=400,
+            fps=200,
         ),
     ),
 )

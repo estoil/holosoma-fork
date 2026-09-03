@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------------------------------
+# Modified from the Holosoma framework (Amazon FAR): https://github.com/amazon-far/holosoma
+# Copyright Amazon.com, Inc. or its affiliates. Licensed under the Apache License, Version 2.0.
+# This file was CHANGED for DDC: it carries the deployable support-relative dynamic-CoM observation
+# and/or the human-science balance reward library and its config (see training/TRAINING.md).
+# The Apache-2.0 license text is in the repository LICENSE; attribution is in training/NOTICE.
+# ---------------------------------------------------------------------------------------------------
+
 from dataclasses import replace
 
 from holosoma.config_types.experiment import ExperimentConfig, NightlyConfig, TrainingConfig
@@ -93,7 +101,8 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
         config=replace(
             algo.fast_sac.config,
             num_learning_iterations=400000,
-            save_interval=1000,  # 密存供 SWA 平均
+            save_interval=2000,  # save a pt every 2000 iters (pairs with save_start_step)
+            save_start_step=150000,  # no pt saved before step 150000 (affects checkpointing only, not the wandb curves; set 0 to save from the start)
             v_max=20.0,
             v_min=-20.0,
             gamma=0.99,  # For motion tracking, high gamma + high num_steps is better
@@ -112,7 +121,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
             simulator.isaacsim.config,
             sim=replace(
                 simulator.isaacsim.config.sim,
-                max_episode_length_s=10.0,
+                max_episode_length_s=22.0,#之前是10,为了囊括单脚动作的全部
             ),
         ),
     ),

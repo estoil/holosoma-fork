@@ -1232,7 +1232,7 @@ class MuJoCo(BaseSimulator):
             logger.info("No robot DOFs available - skipping DOF state update")
             return
 
-        assert dof_states
+        assert dof_states is not None
         if dof_states.dim() != 2 and dof_states.shape[0] != len(env_ids) * self.num_dof:
             raise ValueError(
                 f"Unsupported dof_states tensor format: {dof_states.shape}. "

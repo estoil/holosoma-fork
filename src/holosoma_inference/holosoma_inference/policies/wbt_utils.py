@@ -89,7 +89,12 @@ class TimestepUtil:
 
 
 class PinocchioRobot:
-    def __init__(self, robot_cfg: RobotConfig, urdf_text: str):
+    def __init__(
+        self,
+        robot_cfg: RobotConfig,
+        urdf_text: str,
+        training_body_names: list[str] | tuple[str, ...] | None = None,
+    ):
         # create pinocchio robot
         xml_text = self._create_xml_from_urdf(urdf_text)
         self.robot_model = pin.buildModelFromXML(xml_text, pin.JointModelFreeFlyer())
@@ -122,6 +127,33 @@ class PinocchioRobot:
                 "(required for whole_body_com_rel_support_center)."
             )
 
+        # Training weights exactly the configured simulator body set by each
+        # body's URDF mass. Do not substitute Pinocchio's inertias here: fixed
+        # children are collapsed into those inertias, while the training tensor
+        # deliberately indexes only ``robot.body_names``.
+        urdf_root = ElementTree.fromstring(urdf_text)
+        urdf_link_masses = {}
+        for link in urdf_root.findall("link"):
+            mass = link.find("inertial/mass")
+            if mass is not None:
+                urdf_link_masses[link.attrib["name"]] = float(mass.attrib["value"])
+
+        if not training_body_names:
+            raise ValueError("ONNX experiment metadata must provide robot.body_names for WBT CoM parity.")
+        missing_masses = [name for name in training_body_names if name not in urdf_link_masses]
+        if missing_masses:
+            raise ValueError(f"URDF masses missing for training bodies: {missing_masses}")
+        self.link_origin_frame_ids = tuple(
+            self.robot_model.getFrameId(name, pin.FrameType.BODY) for name in training_body_names
+        )
+        if any(frame_id >= self.robot_model.nframes for frame_id in self.link_origin_frame_ids):
+            raise ValueError("A training body frame is missing from the Pinocchio model.")
+        self.link_origin_masses = np.asarray(
+            [urdf_link_masses[name] for name in training_body_names], dtype=np.float64
+        )
+        if np.any(~np.isfinite(self.link_origin_masses)) or self.link_origin_masses.sum() <= 0.0:
+            raise ValueError("Pinocchio model contains invalid link masses.")
+
     def fk_and_get_ref_body_orientation_in_world(self, configuration: np.ndarray) -> np.ndarray:
         # forward kinematics
         pin.framesForwardKinematics(self.robot_model, self.robot_data, configuration)
@@ -140,18 +172,19 @@ class PinocchioRobot:
         projected_gravity_b: np.ndarray,
         double_support_height_diff: float = 0.03,
     ) -> np.ndarray:
-        """Whole-body CoM relative to the support-foot center, base frame: (4,) = [pos_xy, vel_xy].
+        """Training-compatible mass-weighted link-origin state relative to support.
 
-        Deployable reconstruction matching the training obs ``whole_body_com_rel_support_center``
-        (and ``com_rel_support_obs.tex``)::
+        The training term calls this quantity CoM, but intentionally approximates
+        it by weighting rigid-body *link origins* by body mass. Reproduce that
+        approximation here rather than using Pinocchio's inertial CoM::
 
             pos_b = d_c - d_s
             vel_b = omega_b x (d_c - d_s) + (J_c - J_s) @ qdot
 
         The free-flyer base is set to identity, so Pinocchio returns the CoM / foot positions and
         Jacobians already in the base frame -- no base pose or base linear velocity is required.
-        Inputs are encoder ``q``/``qdot``, the IMU gyro (``base_ang_vel_b``) and ``projected_gravity``,
-        so the value is IDENTICAL in MuJoCo (sim2sim) and on the real robot. The support foot is chosen
+        Inputs are encoder ``q``/``qdot``, the IMU gyro (``base_ang_vel_b``) and ``projected_gravity``.
+        The support foot is chosen
         by FK foot heights (HuB-style: the lower foot supports; both within ``double_support_height_diff``
         -> double support), with height measured along world-up = -projected_gravity.
         """
@@ -164,12 +197,23 @@ class PinocchioRobot:
         q[7:] = np.asarray(dof_pos_real, dtype=np.float64).reshape(njoints)[self.real2pinocchio_index]
         qdot_pin = np.asarray(dof_vel_real, dtype=np.float64).reshape(njoints)[self.real2pinocchio_index]
 
-        pin.centerOfMass(model, data, q)
-        j_com = np.asarray(pin.jacobianCenterOfMass(model, data, q), dtype=np.float64)[:, 6:]  # (3, njoints)
+        pin.forwardKinematics(model, data, q)
         pin.computeJointJacobians(model, data, q)
         pin.updateFramePlacements(model, data)
 
-        d_c = np.asarray(data.com[0], dtype=np.float64).reshape(3)
+        origin_positions = []
+        origin_jacobians = []
+        for frame_id in self.link_origin_frame_ids:
+            origin_positions.append(np.asarray(data.oMf[frame_id].translation, dtype=np.float64).reshape(3))
+            origin_jacobians.append(
+                np.asarray(pin.getFrameJacobian(model, data, frame_id, pin.LOCAL_WORLD_ALIGNED), dtype=np.float64)[
+                    :3, 6:
+                ]
+            )
+        masses = self.link_origin_masses
+        total_mass = float(masses.sum())
+        d_c = np.average(np.stack(origin_positions), axis=0, weights=masses)
+        j_com = np.tensordot(masses, np.stack(origin_jacobians), axes=(0, 0)) / total_mass
         d_feet, j_feet = [], []
         for fid in (self.left_foot_frame_id, self.right_foot_frame_id):
             d_feet.append(np.asarray(data.oMf[fid].translation, dtype=np.float64).reshape(3))
@@ -196,7 +240,13 @@ class PinocchioRobot:
         rel = d_c - d_s
         omega = np.asarray(base_ang_vel_b, dtype=np.float64).reshape(3)
         vel = np.cross(omega, rel) + (j_com - j_s) @ qdot_pin
-        return np.concatenate([rel[:2], vel[:2]]).astype(np.float32)
+
+        # Training discards the world-vertical component before rotating the
+        # relative vectors into the base frame. In base coordinates this is an
+        # orthogonal projection onto the plane normal to world-up.
+        rel_horizontal = rel - float(rel @ up) * up
+        vel_horizontal = vel - float(vel @ up) * up
+        return np.concatenate([rel_horizontal[:2], vel_horizontal[:2]]).astype(np.float32)
 
     @staticmethod
     def _create_xml_from_urdf(urdf_text: str) -> str:

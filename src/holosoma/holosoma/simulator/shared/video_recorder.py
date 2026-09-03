@@ -88,6 +88,10 @@ class VideoRecorderInterface(ABC):
 
         # Frame decimation counter for capturing at control frequency
         self._frame_counter: int = 0
+        # Optional extra decimation for evaluation videos.  A stride of two
+        # preserves the full simulated duration while encoding at half the
+        # control-rate FPS.  Training/default behavior remains stride one.
+        self.capture_stride: int = 1
 
         # Performance timing statistics
         self._frame_times: list[float] = []
@@ -251,9 +255,10 @@ class VideoRecorderInterface(ABC):
         # Increment frame counter for decimation tracking
         self._frame_counter += 1
 
-        # Only capture frame at control frequency (every control_decimation physics steps)
+        # Capture at control frequency, optionally with an additional video-only stride.
         control_decimation = self.simulator.simulator_config.sim.control_decimation
-        if self._frame_counter % control_decimation != 0:
+        capture_decimation = control_decimation * max(int(self.capture_stride), 1)
+        if self._frame_counter % capture_decimation != 0:
             return
 
         if self.config.use_recording_thread:
@@ -509,7 +514,7 @@ class VideoRecorderInterface(ABC):
             # Calculate actual video FPS based on control frequency and playback rate
             # Frames are captured at control_frequency = sim_fps / control_decimation
             # To achieve desired playback rate: actual_fps = control_frequency * playback_rate
-            display_fps = self._control_frequency() * self.config.playback_rate
+            display_fps = self._control_frequency() * self.config.playback_rate / max(int(self.capture_stride), 1)
 
             # Get save directory
             save_dir = self._get_save_directory()

@@ -21,6 +21,51 @@ The sim-to-sim workflow allows you to replay IsaacSim/IsaacGym-trained WBT check
 
 ## Unitree G1 (29-DOF)
 
+### Synchronized motion-state start (recommended for existing dynamic clips)
+
+When a checkpoint's embedded motion begins with non-zero root/joint velocity,
+the normal gantry workflow does not reproduce the state used to reset the
+training environment. Use the synchronized start below to evaluate an existing
+checkpoint without searching for an artificial static frame.
+
+Start MuJoCo first. It loads the complete floating-base and joint state from the
+NPZ, publishes that frozen state through DDS, and keeps physics time at zero:
+
+```bash
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof \
+    --motion-state-file motions_from_web/taichi_g1_danjiao_4_4_holosoma.npz \
+    --motion-state-timestep 0
+```
+
+Wait for `Motion-state simulation ARMED`, then start inference in another
+terminal. The automatic flags ensure that the first active command and motion
+clock are ready before MuJoCo releases physics:
+
+```bash
+source scripts/source_inference_uv_setup.sh
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
+    --task.model-path /path/to/model.onnx \
+    --task.no-use-joystick \
+    --task.use-sim-time \
+    --task.rl-rate 50 \
+    --task.motion-end-timestep 991 \
+    --task.interface lo \
+    --task.motion-state-handshake \
+    --task.auto-start-policy \
+    --task.auto-start-motion-clip \
+    --secondary none
+```
+
+Press `Enter` at the stiff-mode safety prompt. No `]`, `m`, `8`, or `9` input
+is needed: inference activates automatically, MuJoCo detects its non-zero-gain
+command, re-applies the exact NPZ state, disables the gantry, and starts physics.
+
+This mode is intended to measure cross-simulator tracking of an existing policy.
+It does **not** demonstrate a deployable zero-velocity startup. Real-robot
+deployment still requires a trained standing/transition segment, for example
+`enable_default_pose_prepend=True` in the WBT motion configuration.
+
 ### 1. Start MuJoCo Environment
 
 In one terminal, launch the MuJoCo environment:

@@ -25,12 +25,29 @@ from holosoma_inference.utils.math.quat import (
 )
 
 
+def reference_pose_action(
+    reference_dof_pos: np.ndarray,
+    default_dof_pos: np.ndarray,
+    action_scale: np.ndarray | float,
+    clip_value: float = 100.0,
+) -> np.ndarray:
+    """Return the action whose PD target is exactly ``reference_dof_pos``."""
+    reference = np.asarray(reference_dof_pos, dtype=np.float32)
+    default = np.asarray(default_dof_pos, dtype=np.float32)
+    scale = np.asarray(action_scale, dtype=np.float32)
+    if np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+        raise ValueError("WBT reference-pose action requires finite positive action scales.")
+    action = (reference - default) / scale
+    return np.clip(action, -clip_value, clip_value).astype(np.float32, copy=False)
+
+
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         self.config = config
 
         # initialize motion state
         self.motion_clip_progressing = False
+        self.motion_clip_finished = False
         self.curr_motion_timestep = config.task.motion_start_timestep
         self.motion_command_t = None
         self.ref_quat_xyzw_t = None
@@ -138,7 +155,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
-        self.pinocchio_robot = PinocchioRobot(self.config.robot, metadata["robot_urdf"])
+        training_body_names = metadata.get("experiment_config", {}).get("robot", {}).get("body_names")
+        self.pinocchio_robot = PinocchioRobot(
+            self.config.robot,
+            metadata["robot_urdf"],
+            training_body_names=training_body_names,
+        )
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
@@ -233,6 +255,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         saved = state["per_joint_policy_action_scale"]
         self.per_joint_policy_action_scale = saved.copy() if saved is not None else None
         self.motion_clip_progressing = False
+        self.motion_clip_finished = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.robot_yaw_offset = 0.0
@@ -246,12 +269,28 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.future_support_phase_t = self.future_support_phase_0.copy()
         self.future_cmd_t = self.future_cmd_0.copy()
         self.motion_clip_progressing = False
+        self.motion_clip_finished = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
         self._configure_action_scales()
+        self._reset_last_action_to_reference()
+
+    def _reset_last_action_to_reference(self) -> None:
+        """Match the action-history value used by the training environment at reset."""
+        scales = (
+            self.per_joint_policy_action_scale
+            if self.per_joint_policy_action_scale is not None
+            else self.policy_action_scale
+        )
+        self.last_policy_action = reference_pose_action(
+            self.motion_command_0[:, : self.num_dofs],
+            self.default_dof_angles,
+            scales,
+        )
+        self.scaled_policy_action = self.last_policy_action * scales
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -325,7 +364,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def rl_inference(self, robot_state_data):
         # prepare obs, run policy inference
-        if not self.motion_clip_progressing:
+        if not self.motion_clip_progressing and not self.motion_clip_finished:
             # Keep motion index pinned at the configured start while waiting to trigger the clip.
             self.timestep_util.reset(start_timestep=self.config.task.motion_start_timestep)
             self.curr_motion_timestep = self.timestep_util.timestep
@@ -429,6 +468,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         }
 
     def _handle_start_policy(self):
+        self._reset_last_action_to_reference()
         super()._handle_start_policy()
         self._stiff_hold_active = False
         self._capture_robot_yaw_offset()
@@ -450,6 +490,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if (end := self.config.task.motion_end_timestep) and self.curr_motion_timestep >= end:
                 self.logger.info(colored(f"Reached end timestep {end}, stopping motion clip", "yellow"))
                 self.motion_clip_progressing = False
+                self.motion_clip_finished = True
                 self.curr_motion_timestep = end
 
     def _handle_stop_policy(self):
@@ -462,6 +503,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.interface.no_action = 0
 
         self.motion_clip_progressing = False
+        self.motion_clip_finished = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
@@ -477,6 +519,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.timestep_util.reset(start_timestep=self.config.task.motion_start_timestep)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.motion_clip_progressing = True
+        self.motion_clip_finished = False
 
         if self.config.task.motion_start_timestep > 0 or self.config.task.motion_end_timestep is not None:
             start_str = str(self.config.task.motion_start_timestep)

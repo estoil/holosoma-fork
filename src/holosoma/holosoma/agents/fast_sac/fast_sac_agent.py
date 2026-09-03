@@ -800,7 +800,12 @@ class FastSACAgent(BaseAlgo):
 
                     # Use logging helper
                     self.logging_helper.post_epoch_logging(it=self.global_step, loss_dict=loss_dict, extra_log_dicts={})
-                if args.save_interval > 0 and self.global_step > 0 and self.global_step % args.save_interval == 0:
+                if (
+                    args.save_interval > 0
+                    and self.global_step >= args.save_start_step
+                    and self.global_step > 0
+                    and self.global_step % args.save_interval == 0
+                ):
                     if self.is_main_process:
                         logger.info(f"Saving model at global step {self.global_step}")
                         self.save(os.path.join(self.log_dir, f"model_{self.global_step:07d}.pt"))

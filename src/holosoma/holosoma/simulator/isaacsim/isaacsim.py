@@ -819,7 +819,19 @@ class IsaacSim(BaseSimulator):
         self._sim_step_counter += 1
         # Only render if actively recording (not just if video recorder exists)
         has_video_recording = self.video_recorder is not None and self.video_recorder.is_recording
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors() or has_video_recording
+        video_render_due = False
+        if has_video_recording:
+            recorder = self.video_recorder
+            control_decimation = max(int(self.simulator_config.sim.control_decimation), 1)
+            capture_stride = max(int(getattr(recorder, "capture_stride", 1)), 1)
+            # capture_frame() increments its counter later in this physics step.
+            # Render only when that next counter value will actually be captured.
+            video_render_due = (recorder._frame_counter + 1) % (control_decimation * capture_stride) == 0
+        # The recorder's Replicator camera itself makes has_rtx_sensors() true.
+        # While recording, let video_render_due control that camera; otherwise
+        # the RTX flag would defeat capture_stride and render every control step.
+        sensor_render_due = self.sim.has_rtx_sensors() and not has_video_recording
+        is_rendering = self.sim.has_gui() or sensor_render_due or video_render_due
 
         # Apply virtual gantry forces before physics step
         if self.virtual_gantry:

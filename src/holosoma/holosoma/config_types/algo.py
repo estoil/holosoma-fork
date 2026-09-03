@@ -293,6 +293,9 @@ class FastSACConfig:
     save_interval: int = 1000
     """the interval to save the model"""
 
+    save_start_step: int = 0
+    """the first training step at which periodic checkpoints may be saved"""
+
     logging_interval: int = 100
     """the interval to log the metrics"""
 

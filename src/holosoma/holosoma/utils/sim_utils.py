@@ -12,8 +12,11 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 from loguru import logger
 from typing_extensions import Self
 
@@ -28,6 +31,114 @@ from holosoma.utils.rate import RateLimiter
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
+
+MOTION_STATE_HANDSHAKE_DQ = 12345.0
+
+
+@dataclass(frozen=True)
+class MotionInitialState:
+    """Complete floating-base and joint state loaded from a Holosoma motion."""
+
+    timestep: int
+    fps: float
+    root_state: np.ndarray
+    dof_pos: np.ndarray
+    dof_vel: np.ndarray
+
+
+def world_to_body_vector_xyzw(vector_w: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
+    """Rotate a world-frame vector into the body frame defined by ``quat_xyzw``."""
+    vector = np.asarray(vector_w, dtype=np.float32)
+    quat = np.asarray(quat_xyzw, dtype=np.float32)
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm < 1e-6:
+        raise ValueError(f"Invalid xyzw quaternion: {quat}")
+    quat = quat / norm
+
+    # Rotate with the conjugate quaternion because q maps body vectors to world.
+    u = -quat[:3]
+    scalar = quat[3]
+    return (
+        2.0 * np.dot(u, vector) * u
+        + (scalar * scalar - np.dot(u, u)) * vector
+        + 2.0 * scalar * np.cross(u, vector)
+    ).astype(np.float32, copy=False)
+
+
+def load_motion_initial_state(
+    path: str | Path,
+    timestep: int,
+    expected_joint_names: list[str] | tuple[str, ...],
+) -> MotionInitialState:
+    """Load and validate a complete robot state from a Holosoma motion NPZ."""
+    motion_path = Path(path).expanduser().resolve()
+    if not motion_path.is_file():
+        raise FileNotFoundError(f"Motion state file does not exist: {motion_path}")
+
+    with np.load(motion_path, allow_pickle=False) as motion:
+        required = {"fps", "joint_names", "joint_pos", "joint_vel"}
+        missing = sorted(required.difference(motion.files))
+        if missing:
+            raise ValueError(f"Motion state file is missing required arrays: {missing}")
+
+        joint_names = [str(name) for name in motion["joint_names"].tolist()]
+        expected = list(expected_joint_names)
+        if len(joint_names) != len(expected) or set(joint_names) != set(expected):
+            missing_joints = sorted(set(expected).difference(joint_names))
+            extra_joints = sorted(set(joint_names).difference(expected))
+            raise ValueError(
+                "Motion/simulator joint names do not match: "
+                f"missing={missing_joints}, extra={extra_joints}"
+            )
+
+        joint_pos = np.asarray(motion["joint_pos"], dtype=np.float32)
+        joint_vel = np.asarray(motion["joint_vel"], dtype=np.float32)
+        if joint_pos.ndim != 2:
+            raise ValueError(f"joint_pos must be 2D, got {joint_pos.shape}")
+        num_frames = joint_pos.shape[0]
+        if joint_pos.shape[1] != len(joint_names) + 7:
+            raise ValueError(
+                f"joint_pos must have shape [T, 7 + {len(joint_names)}], got {joint_pos.shape}"
+            )
+        if joint_vel.ndim != 2 or joint_vel.shape != (num_frames, len(joint_names) + 6):
+            raise ValueError(
+                f"joint_vel must have shape [{num_frames}, 6 + {len(joint_names)}], got {joint_vel.shape}"
+            )
+        if not 0 <= timestep < num_frames:
+            raise ValueError(f"motion_state_timestep must be in [0, {num_frames - 1}], got {timestep}")
+
+        pos_frame = joint_pos[timestep]
+        vel_frame = joint_vel[timestep]
+        # Holosoma motion NPZ stores the root quaternion as wxyz, while every
+        # simulator-facing root-state tensor uses xyzw.
+        root_quat_wxyz = pos_frame[3:7]
+        quat_norm = float(np.linalg.norm(root_quat_wxyz))
+        if not np.isfinite(quat_norm) or quat_norm < 1e-6:
+            raise ValueError(f"Invalid root quaternion at timestep {timestep}: {root_quat_wxyz}")
+        root_quat_wxyz = root_quat_wxyz / quat_norm
+        root_quat_xyzw = root_quat_wxyz[[1, 2, 3, 0]]
+
+        source_index = {name: index for index, name in enumerate(joint_names)}
+        reorder = [source_index[name] for name in expected]
+        root_state = np.concatenate(
+            [pos_frame[:3], root_quat_xyzw, vel_frame[:6]]
+        ).astype(np.float32)
+        dof_pos = pos_frame[7:][reorder].astype(np.float32, copy=True)
+        dof_vel = vel_frame[6:][reorder].astype(np.float32, copy=True)
+        fps_values = np.asarray(motion["fps"]).reshape(-1)
+        if fps_values.size != 1 or float(fps_values[0]) <= 0:
+            raise ValueError(f"fps must contain one positive value, got {fps_values}")
+
+    if not all(np.isfinite(value).all() for value in (root_state, dof_pos, dof_vel)):
+        raise ValueError(f"Motion state at timestep {timestep} contains non-finite values")
+
+    return MotionInitialState(
+        timestep=timestep,
+        fps=float(fps_values[0]),
+        root_state=root_state,
+        dof_pos=dof_pos,
+        dof_vel=dof_vel,
+    )
 
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
@@ -368,6 +479,7 @@ class DirectSimulation:
         self.device = device
         self.simulation_app = simulation_app
         self.simulator = env.sim
+        self.motion_initial_state: MotionInitialState | None = None
 
     def __enter__(self) -> Self:
         """Context manager entry - initialize the simulation.
@@ -432,6 +544,14 @@ class DirectSimulation:
         self.simulator.prepare_sim()
         logger.debug("simulator.prepare_sim() completed")
 
+        if self.config.motion_state_file:
+            self.motion_initial_state = load_motion_initial_state(
+                self.config.motion_state_file,
+                self.config.motion_state_timestep,
+                self.simulator.dof_names,
+            )
+            self._apply_motion_initial_state()
+
         # Step 5.5: Initialize episode (positions virtual gantry, etc.)
         self.simulator.on_episode_start(env_id=0)
         logger.debug("simulator.on_episode_start() completed")
@@ -466,6 +586,20 @@ class DirectSimulation:
         logger.info(f"Viewer rate: {1 / self.config.viewer_dt:.1f} Hz (sync every {viewer_steps} steps)")
         logger.info("Starting direct simulation loop...")
         logger.info("Press Ctrl+C to stop simulation")
+
+        if self.motion_initial_state is not None and self.config.wait_for_policy_command:
+            self._wait_for_policy_command()
+            # Re-apply at the hand-off boundary so the first physics step starts
+            # from exactly the same state that was published to the policy.
+            self._apply_motion_initial_state()
+
+        if (
+            self.motion_initial_state is not None
+            and self.config.disable_gantry_on_motion_start
+            and self.simulator.virtual_gantry is not None
+        ):
+            self.simulator.virtual_gantry.set_enable(False)
+            logger.info("Virtual gantry disabled for motion-state start")
 
         # Determine refresh strategy based on simulator type
         # IsaacGym/IsaacSim: need pre-step to refresh tensors to sync simulator state
@@ -514,6 +648,75 @@ class DirectSimulation:
         avg_fps = step_count / total_elapsed if total_elapsed > 0 else 0
         logger.info(f"Simulation completed after {step_count} steps")
         logger.info(f"Average FPS: {avg_fps:.1f} (target: {sim_frequency})")
+
+    def _apply_motion_initial_state(self) -> None:
+        """Write the loaded floating-base and joint state into the simulator."""
+        state = self.motion_initial_state
+        if state is None:
+            return
+
+        env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        root_state_np = state.root_state.copy()
+        if get_simulator_type() == SimulatorType.MUJOCO:
+            # Holosoma motion files store root angular velocity in world axes;
+            # MuJoCo free-joint qvel stores it in the floating body's local axes.
+            root_state_np[10:13] = world_to_body_vector_xyzw(root_state_np[10:13], root_state_np[3:7])
+        root_state = torch.as_tensor(root_state_np, device=self.device, dtype=torch.float32).unsqueeze(0)
+        dof_pos = torch.as_tensor(state.dof_pos, device=self.device, dtype=torch.float32)
+        dof_vel = torch.as_tensor(state.dof_vel, device=self.device, dtype=torch.float32)
+        dof_state = torch.stack((dof_pos, dof_vel), dim=-1)
+
+        self.simulator.set_actor_root_state_tensor_robots(env_ids, root_state)
+        self.simulator.set_dof_state_tensor_robots(env_ids, dof_state)
+        logger.info(
+            "Applied motion state: timestep={} fps={} root_pos={} max_abs_dof_vel={:.3f}",
+            state.timestep,
+            state.fps,
+            np.round(state.root_state[:3], 4).tolist(),
+            float(np.max(np.abs(state.dof_vel))),
+        )
+
+    def _wait_for_policy_command(self) -> None:
+        """Publish a frozen state/clock until an active DDS policy command arrives."""
+        bridge = self.simulator.bridge
+        if bridge is None or bridge.robot_bridge is None:
+            raise RuntimeError("motion-state arming requires an enabled robot bridge")
+
+        logger.info("Motion-state simulation ARMED: physics is paused at t=0")
+        logger.info(
+            "Start inference with --task.motion-state-handshake "
+            "--task.auto-start-policy --task.auto-start-motion-clip"
+        )
+        started_at = time.monotonic()
+        last_status = started_at
+        wait_rate = RateLimiter(200)
+        handshake_seen = False
+
+        while True:
+            bridge.step()
+            command = bridge.robot_bridge.low_cmd
+            gains = np.asarray(getattr(command, "kp", []), dtype=np.float32)
+            velocity_targets = np.asarray(getattr(command, "dq_target", []), dtype=np.float32)
+            is_handshake = (
+                velocity_targets.size == self.simulator.num_dof
+                and np.isclose(velocity_targets[0], MOTION_STATE_HANDSHAKE_DQ, rtol=0.0, atol=0.1)
+                and np.all(np.abs(gains) <= 1e-6)
+            )
+            if is_handshake and not handshake_seen:
+                handshake_seen = True
+                logger.info("Motion-state handshake received; waiting for the first active policy command")
+            elif handshake_seen and gains.size == self.simulator.num_dof and np.any(np.abs(gains) > 1e-6):
+                logger.info("Active policy command received; releasing synchronized physics start")
+                return
+
+            now = time.monotonic()
+            timeout = self.config.policy_wait_timeout_s
+            if timeout > 0 and now - started_at >= timeout:
+                raise TimeoutError(f"No active policy command received within {timeout:.1f}s")
+            if now - last_status >= 5.0:
+                logger.info("Still armed; waiting for active policy command...")
+                last_status = now
+            wait_rate.sleep()
 
     def cleanup(self) -> None:
         """Handle simulation cleanup."""
@@ -573,5 +776,10 @@ class DirectSimulation:
         """
         elapsed = time.time() - fps_start_time
         fps = 1000 / elapsed
-        logger.info(f"Simulation FPS: {fps:.1f}")
+        root_state = self.simulator.robot_root_states[0]
+        root_z = float(root_state[2].item())
+        quat_xyzw = root_state[3:7].detach().cpu().numpy()
+        body_up_dot_world_up = float(1.0 - 2.0 * (quat_xyzw[0] ** 2 + quat_xyzw[1] ** 2))
+        tilt_deg = float(np.degrees(np.arccos(np.clip(body_up_dot_world_up, -1.0, 1.0))))
+        logger.info("Simulation FPS: {:.1f} | root_z: {:.3f} m | base_tilt: {:.1f} deg", fps, root_z, tilt_deg)
         return time.time()

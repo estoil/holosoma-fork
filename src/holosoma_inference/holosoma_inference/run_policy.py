@@ -13,8 +13,10 @@ Usage:
 from __future__ import annotations
 
 import sys
+import time
 import traceback
 
+import numpy as np
 import tyro
 from loguru import logger
 
@@ -23,6 +25,31 @@ from holosoma_inference.config.config_values.inference import get_annotated_infe
 from holosoma_inference.config.utils import TYRO_CONFIG
 from holosoma_inference.policies.dual_mode import DualModePolicy, _select_policy_class
 from holosoma_inference.utils.misc import restore_terminal_settings
+
+MOTION_STATE_HANDSHAKE_DQ = 12345.0
+
+
+def _send_motion_state_handshake(policy) -> None:
+    """Send an unmistakable zero-gain command while MuJoCo physics is armed."""
+    robot_state = policy.interface.get_low_state()
+    if robot_state is None:
+        raise RuntimeError("Cannot send motion-state handshake without a robot state")
+
+    dof_pos = np.asarray(robot_state[0, 7 : 7 + policy.num_dofs], dtype=np.float32)
+    dof_vel_marker = np.zeros(policy.num_dofs, dtype=np.float32)
+    dof_vel_marker[0] = MOTION_STATE_HANDSHAKE_DQ
+    zeros = np.zeros(policy.num_dofs, dtype=np.float32)
+    for _ in range(5):
+        policy.interface.send_low_command(
+            dof_pos,
+            dof_vel_marker,
+            zeros,
+            dof_pos,
+            kp_override=zeros,
+            kd_override=zeros,
+        )
+        time.sleep(0.01)
+    logger.info("Motion-state synchronization handshake sent")
 
 
 def _print_control_guide(policy_class, use_joystick: bool, dual_mode: bool = False):
@@ -119,6 +146,19 @@ def run_policy(config: InferenceConfig):
             policy = policy_class(config=config)
 
         logger.info("✅ Policy initialized successfully!")
+        active_policy = policy.active if isinstance(policy, DualModePolicy) else policy
+        if config.task.motion_state_handshake:
+            _send_motion_state_handshake(active_policy)
+        if config.task.auto_start_policy:
+            active_policy._handle_start_policy()
+            logger.info("Automatic policy activation enabled")
+        if config.task.auto_start_motion_clip:
+            start_motion = getattr(active_policy, "_handle_start_motion_clip", None)
+            if start_motion is None:
+                raise ValueError("--task.auto-start-motion-clip is only supported by WBT policies")
+            start_motion()
+            logger.info("Automatic motion clip start enabled")
+
         use_joystick = bool({"joystick", "interface"} & {config.task.velocity_input, config.task.state_input})
         _print_control_guide(policy_class, use_joystick, dual_mode=dual_mode)
         policy.run()

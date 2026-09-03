@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------------------------------
+# Modified from the Holosoma framework (Amazon FAR): https://github.com/amazon-far/holosoma
+# Copyright Amazon.com, Inc. or its affiliates. Licensed under the Apache License, Version 2.0.
+# This file was CHANGED for DDC: it carries the deployable support-relative dynamic-CoM observation
+# and/or the human-science balance reward library and its config (see training/TRAINING.md).
+# The Apache-2.0 license text is in the repository LICENSE; attribution is in training/NOTICE.
+# ---------------------------------------------------------------------------------------------------
+
 """Reward terms for Whole Body Tracking tasks."""
 
 from __future__ import annotations
@@ -6,7 +14,6 @@ import re
 from typing import TYPE_CHECKING, List
 
 import torch
-from loguru import logger
 
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
@@ -107,160 +114,6 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
     return torch.exp(-error.mean(-1) / sigma**2)
-
-
-def motion_joint_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
-    """全关节角跟踪（可选工具函数，默认配置不启用）。
-
-    BeyondMimic/WBT 主奖励是 task-space 刚体跟踪；全关节等权 mean 易被手臂稀释，
-    且与 body 奖励双重计数，一般不应当作主补丁。需要时再在配置中显式打开。
-    """
-    motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.mean(torch.square(motion_command.joint_pos - motion_command.robot_joint_pos), dim=-1)
-    return torch.exp(-error / sigma**2)
-
-
-class MotionAnkleHeightTrackingExp(RewardTermBase):
-    """单独奖励脚踝高度跟踪，避免被全身刚体平均稀释。
-
-    误差口径与 ``BadTrackingZOnly`` 一致：比较 ``body_pos_relative_w`` 与机器人
-    刚体世界系 Z。默认监控左右 ``ankle_roll_link``。
-
-    注意：``RewardManager`` 在 ``CommandManager`` 之前初始化，因此脚踝在
-    ``body_names_to_track`` 中的索引必须延迟到首次计算奖励时再解析。
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
-        super().__init__(cfg, env)
-        self.env = env
-        self.sigma = float(cfg.params.get("sigma", 0.08))
-        self.body_names = list(
-            cfg.params.get(
-                "body_names",
-                ("left_ankle_roll_link", "right_ankle_roll_link"),
-            )
-        )
-        self.body_indexes: torch.Tensor | None = None
-
-    def _ensure_body_indexes(self, env: WholeBodyTrackingManager) -> torch.Tensor:
-        if self.body_indexes is not None:
-            return self.body_indexes
-        motion_command = _get_motion_command_and_assert_type(env)
-        tracked = list(motion_command.motion_cfg.body_names_to_track)
-        missing = [n for n in self.body_names if n not in tracked]
-        assert not missing, f"脚踝高度奖励所需刚体不在 body_names_to_track 中: {missing}"
-        self.body_indexes = torch.tensor(
-            [tracked.index(n) for n in self.body_names],
-            dtype=torch.long,
-            device=env.device,
-        )
-        return self.body_indexes
-
-    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
-        motion_command = _get_motion_command_and_assert_type(env)
-        body_indexes = self._ensure_body_indexes(env)
-        z_err = (
-            motion_command.body_pos_relative_w[:, body_indexes, -1]
-            - motion_command.robot_body_pos_w[:, body_indexes, -1]
-        )
-        error = torch.mean(torch.square(z_err), dim=-1)
-        return torch.exp(-error / self.sigma**2)
-
-    def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        pass
-
-
-#新增ZMP设计
-class ZMPSupportRegionReward(RewardTermBase):
-    """基于 ZMP 是否落在脚底支撑区域附近的稳定性奖励。"""
-
-    _CONTACT_BODY_ALIASES = {
-        "left_foot_contact_point": "left_ankle_roll_link",
-        "right_foot_contact_point": "right_ankle_roll_link",
-    }
-
-    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
-        super().__init__(cfg, env)
-        self.env = env
-        self.sigma = cfg.params.get("sigma", 0.05)
-        self.support_margin = cfg.params.get("support_margin", 0.04)
-        self.vertical_force_threshold = cfg.params.get("vertical_force_threshold", 1.0)
-        self.debug_log_interval = int(cfg.params.get("debug_log_interval", 0))
-        self._call_count = 0
-
-        contact_body_names = cfg.params.get(
-            "contact_body_names", ("left_ankle_roll_link", "right_ankle_roll_link")
-        )
-        resolved_contact_body_names = self._resolve_contact_body_names(list(contact_body_names))
-        self.contact_body_indexes = self._get_index_of_a_in_b(
-            resolved_contact_body_names,
-            self.env.simulator.body_names,  # type: ignore[attr-defined]
-            self.env.device,
-        )
-        logger.info(
-            "ZMPSupportRegionReward: using contact bodies {} (indexes={})",
-            resolved_contact_body_names,
-            self.contact_body_indexes.detach().cpu().tolist(),
-        )
-
-    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
-        contact_pos_w = self.env.simulator._rigid_body_pos[:, self.contact_body_indexes, :]  # type: ignore[attr-defined]
-        contact_forces_w = self.env.simulator.contact_forces[:, self.contact_body_indexes, :]  # type: ignore[attr-defined]
-
-        fz = torch.clamp(contact_forces_w[..., 2], min=0.0)
-        total_fz = torch.sum(fz, dim=1)
-        has_support = total_fz > self.vertical_force_threshold
-        safe_total_fz = torch.clamp(total_fz, min=self.vertical_force_threshold)
-        self._maybe_log_debug_stats(total_fz, has_support)
-
-        # 地面 ZMP 常用形式：p_z^xy = sum_i(p_i^xy * f_i^z) / sum_i(f_i^z)
-        zmp_xy = torch.sum(contact_pos_w[..., :2] * fz.unsqueeze(-1), dim=1) / safe_total_fz.unsqueeze(-1)
-
-        # 用接触点 xy 的包围盒近似支撑区域，margin 表示允许的脚底/接触面扩展。
-        support_min_xy = torch.min(contact_pos_w[..., :2], dim=1).values - self.support_margin
-        support_max_xy = torch.max(contact_pos_w[..., :2], dim=1).values + self.support_margin
-        clipped_zmp_xy = torch.minimum(torch.maximum(zmp_xy, support_min_xy), support_max_xy)
-        outside_error = torch.sum(torch.square(zmp_xy - clipped_zmp_xy), dim=1)
-
-        reward = torch.exp(-outside_error / self.sigma**2)
-        return torch.where(has_support, reward, torch.zeros_like(reward))
-
-    def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        pass
-
-    def _resolve_contact_body_names(self, body_names: list[str]) -> list[str]:
-        """把辅助接触点名称映射到真实承力 body，避免读取到全 0 的 contact force。"""
-        simulator_body_names = self.env.simulator.body_names  # type: ignore[attr-defined]
-        resolved = []
-        for name in body_names:
-            alias = self._CONTACT_BODY_ALIASES.get(name, name)
-            if alias != name and alias in simulator_body_names:
-                logger.warning("ZMPSupportRegionReward: remap contact body '{}' -> '{}'", name, alias)
-                resolved.append(alias)
-            else:
-                resolved.append(name)
-        return resolved
-
-    def _maybe_log_debug_stats(self, total_fz: torch.Tensor, has_support: torch.Tensor) -> None:
-        """定期打印 ZMP 接触力诊断，确认 reward 是否读到了真实支撑力。"""
-        self._call_count += 1
-        if self.debug_log_interval <= 0 or self._call_count % self.debug_log_interval != 0:
-            return
-
-        logger.info(
-            "ZMPSupportRegionReward: mean_total_fz={:.3f}, max_total_fz={:.3f}, support_ratio={:.3f}",
-            float(total_fz.mean().detach().cpu()),
-            float(total_fz.max().detach().cpu()),
-            float(has_support.float().mean().detach().cpu()),
-        )
-
-    def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
-        indexes = []
-        for name in a_names:
-            assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
-            indexes.append(b_names.index(name))
-        return torch.tensor(indexes, dtype=torch.long, device=device)
-
 
 
 # ================================================================================================
@@ -392,37 +245,20 @@ class ReferenceSupportContactMismatchPenalty(RewardTermBase):
 
 
 # ================================================================================================
-# 平衡奖励：xCoM、支撑多边形边界、到达边界时间以及单脚支撑防滑。
-# 逻辑移植自 whole_body_tracking，参数值由配置文件指定。
-# holosoma 未直接提供全身质心，因此使用各刚体的位置、速度和质量加权计算。
+# Balance rewards (xCoM / support-polygon margin / time-to-boundary) + single-support no-slip
+# Ported from whole_body_tracking (logic identical; param VALUES set in config). holosoma exposes
+# no whole-body CoM, so it is computed from per-body world pos/vel weighted by per-body masses
+# (masses fetched once via simulator.get_body_masses()).
 # ================================================================================================
 
 _FOOT_BODY_NAMES = ("left_ankle_roll_link", "right_ankle_roll_link")
-# 脚部支撑矩形使用踝关节滚转刚体坐标系：x 为前后方向，y 为左右方向，z 为脚底高度。
+# G1 foot support rectangle: corners in the ankle body frame (x, y, z); both feet share it.
 _G1_FOOT_SUPPORT_POLYGON = (
     (-0.05, -0.025, -0.03),
     (0.12, -0.030, -0.03),
     (0.12, 0.030, -0.03),
     (-0.05, 0.025, -0.03),
 )
-# X2 支撑范围取自 x2_31dof.xml 中脚底碰撞球的外包络：
-#   球心范围：x=[-0.065, 0.139]，y=[-0.060, 0.060]，半径=0.005
-#   踝关节滚转刚体坐标系中的脚底高度：z=-0.073
-_X2_FOOT_SUPPORT_POLYGON = (
-    (-0.070, -0.065, -0.073),
-    (0.144, -0.065, -0.073),
-    (0.144, 0.065, -0.073),
-    (-0.070, 0.065, -0.073),
-)
-
-
-def _default_foot_support_polygon(env):
-    """根据机器人型号选择支撑多边形，同时保持 G1 的原有行为。"""
-    asset = getattr(getattr(env, "robot_config", None), "asset", None)
-    robot_type = str(getattr(asset, "robot_type", "")).lower()
-    if robot_type.startswith("x2"):
-        return _X2_FOOT_SUPPORT_POLYGON
-    return _G1_FOOT_SUPPORT_POLYGON
 
 
 def _resolve_foot_body_indexes(env) -> torch.Tensor:
@@ -444,8 +280,22 @@ def _whole_body_com_state(env, body_masses: torch.Tensor, total_mass: torch.Tens
     return com_pos, com_vel
 
 
-def _xcom_xy(com_pos: torch.Tensor, com_vel: torch.Tensor, gravity: float, com_height_floor: float) -> torch.Tensor:
-    """Extrapolated CoM (Hof / LIP): xcom_xy = com_xy + com_vel_xy / omega, omega = sqrt(g / h)."""
+def _xcom_xy(
+    com_pos: torch.Tensor,
+    com_vel: torch.Tensor,
+    gravity: float,
+    com_height_floor: float,
+    use_velocity: bool = True,
+) -> torch.Tensor:
+    """Extrapolated CoM (Hof / LIP): xcom_xy = com_xy + com_vel_xy / omega, omega = sqrt(g / h).
+
+    use_velocity=False -> degenerates to the static geometric CoM (com_xy only).
+    - polygon / xcom_ttb rewards: use this function's default use_velocity=True (always dynamic);
+    - critic obs whole_body_xcom_rel_support_center: passes use_velocity=CRITIC_XCOM_USE_VELOCITY explicitly;
+    - actor obs whole_body_com_rel_support_center: does not use this function; it reads ACTOR_XCOM_USE_VELOCITY in its own func.
+    """
+    if not use_velocity:
+        return com_pos[:, :2]
     h = com_pos[:, 2].clamp_min(com_height_floor)
     omega = torch.sqrt(torch.full_like(h, float(gravity)) / h)
     return com_pos[:, :2] + com_vel[:, :2] / omega.unsqueeze(-1)
@@ -548,9 +398,9 @@ class SupportXcomPolygonMarginPenalty(RewardTermBase):
         self.gravity = p.get("gravity", 9.81)
         self.com_height_floor = p.get("com_height_floor", 0.25)
         self.max_penalty = p.get("max_penalty", 0.04)
-        self.penalty_power = p.get("penalty_power", 2.0)  # 1=线性 hinge, 2=平方(原行为)
+        self.penalty_power = p.get("penalty_power", 2.0)  # 1 = linear hinge, 2 = squared (original behavior)
         self.polygon_b = torch.tensor(
-            p.get("foot_polygon", _default_foot_support_polygon(env)), dtype=torch.float32, device=env.device
+            p.get("foot_polygon", _G1_FOOT_SUPPORT_POLYGON), dtype=torch.float32, device=env.device
         )
 
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
@@ -595,7 +445,7 @@ class XcomTtbPenalty(RewardTermBase):
         self.com_height_floor = p.get("com_height_floor", 0.25)
         self.max_penalty = p.get("max_penalty", 0.09)
         self.polygon_b = torch.tensor(
-            p.get("foot_polygon", _default_foot_support_polygon(env)), dtype=torch.float32, device=env.device
+            p.get("foot_polygon", _G1_FOOT_SUPPORT_POLYGON), dtype=torch.float32, device=env.device
         )
 
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
@@ -718,3 +568,46 @@ class StanceAnkleActionRatePenalty(RewardTermBase):
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         pass
+
+
+class StanceKneeActionRatePenalty(StanceAnkleActionRatePenalty):
+    """During single-leg support, penalize the STANCE leg's KNEE action-rate.
+
+    Structurally identical to StanceAnkleActionRatePenalty (single-support gating + per-joint action-rate
+    on the stance foot), just applied to the knee joint(s) supplied via config. Separate subclass only for
+    a clear per-term name in configs/logs; it inherits the ankle implementation verbatim. Ankle-over-knee
+    weighting is intended, so keep this term's weight below the ankle term's (-0.3).
+    """
+
+
+class ActionJerkPenalty(RewardTermBase):
+    """Penalize the second difference of actions (action "jerk"): (a_t - a_{t-1}) - (a_{t-1} - a_{t-2}).
+
+    Complements action_rate. action_rate (first difference) penalizes ALL action change, so a heavier
+    weight over-smooths and hurts tracking of dynamic motion. Jerk
+    (second difference) is ~0 for smooth motion of ANY speed and only spikes on high-frequency reversals
+    -- it targets the foot-chatter failure mode directly, without the over-regularization of a heavier
+    action_rate. Global: all action dims, every step.
+
+    Stateful: caches the previous step's action-rate, so it never needs a_{t-2} from the action manager.
+    The cache is zeroed per-env on episode reset (the action manager likewise zeros prev_action on reset),
+    so jerk does not spike across the reset boundary beyond the same one-step transient action_rate has.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        action_dim = env.action_manager.action.shape[1]
+        self._prev_action_rate = torch.zeros((env.num_envs, action_dim), device=env.device)
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        action_rate = env.action_manager.action - env.action_manager.prev_action
+        jerk = action_rate - self._prev_action_rate
+        self._prev_action_rate.copy_(action_rate.detach())
+        return torch.sum(torch.square(jerk), dim=1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._prev_action_rate.zero_()
+        else:
+            self._prev_action_rate[env_ids] = 0.0

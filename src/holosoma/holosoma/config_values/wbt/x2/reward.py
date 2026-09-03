@@ -28,15 +28,15 @@ x2_31dof_wbt_reward = RewardManagerCfg(
             params={"sigma": 0.4},
             weight=1.0,
         ),
-        # 脚踝高度单独跟踪：与 BadTrackingZOnly 同口径，打破 14-body 平均对终止量的稀释。
-        # 不启用全关节 q 跟踪：BeyondMimic/WBT 原设计为 task-space；全关节等权 mean 会被手臂稀释且与 body 双重计数。
+        # 脚踝高度：与 BadTrackingZOnly 同位置口径；实现侧用 max(Δz²) 对齐 any(|Δz|>阈)。
+        # σ=0.15 覆盖至终止阈 0.25 前的梯度；weight=5 以便与 14-body 均值项（fast_sac 上可达 2）竞争。
         "motion_ankle_height_tracking_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:MotionAnkleHeightTrackingExp",
             params={
-                "sigma": 0.08,
+                "sigma": 0.15,
                 "body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
             },
-            weight=2.0,
+            weight=5.0,
         ),
         "motion_global_body_lin_vel": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
@@ -85,6 +85,8 @@ x2_31dof_wbt_reward = RewardManagerCfg(
             },
             weight=-0.1,
         ),
+        # 原版 WBT 此项权重为 -10（移植时曾降为 -2）。当前病灶是摆动脚蹭地/双撑作弊
+        # （stance_ankle_action_rate 整训为 0），先回调到 -5 逼出真实单脚支撑。
         "reference_support_contact_mismatch_penalty": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:ReferenceSupportContactMismatchPenalty",
             params={
@@ -93,7 +95,7 @@ x2_31dof_wbt_reward = RewardManagerCfg(
                 "stance_miss_weight": 1.0,
                 "swing_extra_contact_weight": 1.0,
             },
-            weight=-2.0,
+            weight=-5.0,
         ),
         "support_xcom_polygon_margin": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:SupportXcomPolygonMarginPenalty",

@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------------------------------
+# Modified from the Holosoma framework (Amazon FAR): https://github.com/amazon-far/holosoma
+# Copyright Amazon.com, Inc. or its affiliates. Licensed under the Apache License, Version 2.0.
+# This file was CHANGED for DDC: it carries the deployable support-relative dynamic-CoM observation
+# and/or the human-science balance reward library and its config (see training/TRAINING.md).
+# The Apache-2.0 license text is in the repository LICENSE; attribution is in training/NOTICE.
+# ---------------------------------------------------------------------------------------------------
+
 """Whole Body Tracking observation presets for the G1 robot."""
 
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
@@ -18,7 +26,7 @@ actor_obs_shared = ObsGroupCfg(
             noise=0.05,
         ),
         "base_ang_vel": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:base_ang_vel",  # 回退 0705(去掉 IMU OU 变体),2026-07-15
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
             scale=1.0,
             noise=0.2,
         ),
@@ -38,7 +46,7 @@ actor_obs_shared = ObsGroupCfg(
             noise=0.0,
         ),
         "projected_gravity": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:projected_gravity",  # 回退 0705(去掉 IMU OU 变体),2026-07-15
+            func="holosoma.managers.observation.terms.wbt:projected_gravity",
             scale=1.0,
             noise=0.03,
         ),
@@ -59,9 +67,9 @@ actor_obs_shared = ObsGroupCfg(
             scale=1.0,
             noise=0.0,
         ),
-        # DEPLOYABLE balance obs: CoM-rel-support-center 位置 + 相对速度,base 系,共 4 维。
-        # 纯 FK(编码器 + IMU 陀螺),不需 base 线速度/绝对位置;动态世界系 xCoM 留 critic 特权。
-        # noise=0.015:上真机前的域随机(覆盖编码器速度噪声 + 质量/运动学模型误差)。
+        # DEPLOYABLE balance obs: CoM-rel-support-center position + relative velocity, base frame, 4 dims total.
+        # pure FK (encoders + IMU gyro), no base linear velocity / absolute position needed; the dynamic world-frame xCoM stays critic-privileged.
+        # noise=0.015: domain randomization before real-robot transfer (covers encoder-velocity noise + mass/kinematic model error).
         "whole_body_com_rel_support_center": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:whole_body_com_rel_support_center",
             scale=1.0,
@@ -143,8 +151,8 @@ critic_obs_shared_terms = {
         scale=1.0,
         noise=0.0,
     ),
-    # PRIVILEGED / critic-only: xCoM relative to support-foot center (base frame). 故意不加进 actor:
-    # 它依赖世界系 CoM 速度,真机不可靠 → 加 actor 会有 sim2real gap。critic 仅训练用,不部署。
+    # PRIVILEGED / critic-only: xCoM relative to support-foot center (base frame). Deliberately not in the actor:
+    # it depends on world-frame CoM velocity, unreliable on hardware -> adding it to the actor causes a sim2real gap. Critic is training-only, not deployed.
     "whole_body_xcom_rel_support_center": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:whole_body_xcom_rel_support_center",
         scale=1.0,
