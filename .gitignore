@@ -46,6 +46,9 @@ src/holosoma/holosoma/data/motions/**/gmr_nokov/
 *.pt
 *.pth
 *.ckpt
+# This 1.8 MB clip is required by exp:g1-29dof-wbt-fast-sac-robust.
+!motions_from_web/
+!motions_from_web/taichi_g1_danjiao_4_4_holosoma.npz
 # Extra local artifacts
 .cursor/
 *.mp4
