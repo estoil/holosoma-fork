@@ -1,0 +1,34 @@
+{
+  "ranking_csv": "/home/wxy/taichi_deploy/holosoma/eval_results/taichi_g1_danjiao_4_4_onnx_ranking/robust_all_checkpoints_noisy_k10_true20ms_20260904/final_report/all_model_stability.csv",
+  "motion": "taichi_g1_danjiao_4_4_robust_augmented",
+  "seed": 0,
+  "resolution": [
+    1280,
+    720
+  ],
+  "fps": 25.0,
+  "videos": [
+    {
+      "path": "/home/wxy/taichi_deploy/holosoma/eval_videos/robust_top5_true20ms_clean_noisy_20260904/rank_03_step_0182000_clean_seed00.mp4",
+      "condition": "clean",
+      "seed": 0,
+      "success": true,
+      "fell": false,
+      "hop_count": 0,
+      "time_to_fall_s": 29.84,
+      "rank": 3,
+      "step": 182000
+    },
+    {
+      "path": "/home/wxy/taichi_deploy/holosoma/eval_videos/robust_top5_true20ms_clean_noisy_20260904/rank_03_step_0182000_noisy_seed00.mp4",
+      "condition": "noisy",
+      "seed": 0,
+      "success": false,
+      "fell": true,
+      "hop_count": 6,
+      "time_to_fall_s": 10.16,
+      "rank": 3,
+      "step": 182000
+    }
+  ]
+}

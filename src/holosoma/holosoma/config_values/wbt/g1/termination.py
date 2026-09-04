@@ -47,4 +47,17 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_termination"]
+g1_29dof_wbt_robust_termination = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination.terms,
+        # End the episode after the learned post-motion hold. This prevents
+        # MotionCommand.step() from teleporting the robot to a new phase inside
+        # the same episode.
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+            is_timeout=True,
+        ),
+    }
+)
+
+__all__ = ["g1_29dof_wbt_termination", "g1_29dof_wbt_robust_termination"]

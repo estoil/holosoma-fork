@@ -8,6 +8,8 @@
 
 """Whole Body Tracking observation presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
 actor_obs_shared = ObsGroupCfg(
@@ -205,4 +207,40 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_observation", "g1_29dof_wbt_observation_w_object"]
+robust_actor_terms = actor_obs_shared.terms.copy()
+robust_actor_terms.update(
+    {
+        # Coupled, temporally correlated orientation error is closer to a real
+        # estimator than independent white IMU noise.
+        "base_ang_vel": replace(
+            robust_actor_terms["base_ang_vel"],
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel_ou",
+        ),
+        "projected_gravity": replace(
+            robust_actor_terms["projected_gravity"],
+            func="holosoma.managers.observation.terms.wbt:projected_gravity_ou",
+        ),
+        # Match the MuJoCo noisy evaluation: ±0.20 rad/s plus a randomized
+        # one-control-step delay, without changing the ONNX observation size.
+        "dof_vel": replace(
+            robust_actor_terms["dof_vel"],
+            func="holosoma.managers.observation.terms.wbt:RandomDelayedDofVelocity",
+            params={"delay_probability": 0.5},
+            noise=0.20,
+        ),
+    }
+)
+
+g1_29dof_wbt_robust_observation = replace(
+    g1_29dof_wbt_observation,
+    groups={
+        "actor_obs": replace(actor_obs_shared, terms=robust_actor_terms),
+        "critic_obs": g1_29dof_wbt_observation.groups["critic_obs"],
+    },
+)
+
+__all__ = [
+    "g1_29dof_wbt_observation",
+    "g1_29dof_wbt_observation_w_object",
+    "g1_29dof_wbt_robust_observation",
+]

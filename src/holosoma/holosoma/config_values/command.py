@@ -6,6 +6,7 @@ from holosoma.config_values.loco.x2.command import x2_31dof_command
 from holosoma.config_values.wbt.g1.command import (
     g1_29dof_wbt_command,
     g1_29dof_wbt_command_w_object,
+    g1_29dof_wbt_robust_command,
 )
 from holosoma.config_values.wbt.x2.command import x2_31dof_wbt_command
 
@@ -18,5 +19,6 @@ DEFAULTS = {
     "x2_31dof": x2_31dof_command,
     "g1_29dof_wbt": g1_29dof_wbt_command,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_command_w_object,
+    "g1_29dof_wbt_robust": g1_29dof_wbt_robust_command,
     "x2_31dof_wbt": x2_31dof_wbt_command,
 }

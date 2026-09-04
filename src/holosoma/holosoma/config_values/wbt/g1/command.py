@@ -43,6 +43,32 @@ motion_config_w_object = replace(
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
 )
 
+# Single-motion robust training: explicitly learn a quiet double-support pose,
+# enter the Taichi clip smoothly, and return to/hold the same stable pose.
+robust_motion_config = replace(
+    motion_config,
+    motion_file="motions_from_web/taichi_g1_danjiao_4_4_holosoma.npz",
+    use_adaptive_timesteps_sampler=True,
+    # Half of resets exercise the complete stand -> motion -> stand sequence;
+    # the remainder focus on failure-heavy phases through adaptive RSI.
+    start_at_timestep_zero_prob=0.5,
+    freeze_at_timestep_zero_prob=0.0,
+    enable_default_pose_prepend=True,
+    default_pose_prepend_hold_duration_s=2.0,
+    default_pose_prepend_duration_s=2.0,
+    enable_default_pose_append=True,
+    default_pose_append_duration_s=2.0,
+    default_pose_append_hold_duration_s=4.0,
+    noise_to_initial_pose=replace(
+        init_pose_config,
+        dof_pos=0.05,
+        root_pos=[0.02, 0.02, 0.01],
+        root_rot=[0.05, 0.05, 0.10],
+        root_lin_vel=[0.20, 0.20, 0.10],
+        root_ang_vel=[0.20, 0.20, 0.30],
+    ),
+)
+
 g1_29dof_wbt_command = CommandManagerCfg(
     params={},
     setup_terms={
@@ -77,7 +103,18 @@ g1_29dof_wbt_command_w_object = replace(
     },
 )
 
+g1_29dof_wbt_robust_command = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={"motion_config": robust_motion_config},
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_w_object",
+    "g1_29dof_wbt_robust_command",
 ]

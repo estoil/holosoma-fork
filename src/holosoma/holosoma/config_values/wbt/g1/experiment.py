@@ -156,6 +156,42 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
     ),
 )
 
+# Robust single-motion training preset for taichi_g1_danjiao_4_4.  It keeps
+# the original Fast-SAC preset untouched so clean/noisy A/B runs remain easy.
+g1_29dof_wbt_fast_sac_robust = replace(
+    g1_29dof_wbt_fast_sac,
+    training=replace(
+        g1_29dof_wbt_fast_sac.training,
+        name="g1_29dof_wbt_fast_sac_robust_manager",
+    ),
+    algo=replace(
+        g1_29dof_wbt_fast_sac.algo,
+        config=replace(
+            g1_29dof_wbt_fast_sac.algo.config,
+            # 4096 envs x 1024 slots requires about 33.5 GiB for replay
+            # tensors alone. 384 matches the previous successful G1 run and
+            # uses about 12.6 GiB while preserving the same batch/update setup.
+            buffer_size=384,
+        ),
+    ),
+    simulator=replace(
+        g1_29dof_wbt_fast_sac.simulator,
+        config=replace(
+            g1_29dof_wbt_fast_sac.simulator.config,
+            sim=replace(
+                g1_29dof_wbt_fast_sac.simulator.config.sim,
+                # 19.84 s motion + 2 s pre-hold + 2 s entry + 2 s exit
+                # + 4 s post-hold = 29.84 s. motion_ends is the primary stop.
+                max_episode_length_s=32.0,
+            ),
+        ),
+    ),
+    observation=observation.g1_29dof_wbt_robust_observation,
+    termination=termination.g1_29dof_wbt_robust_termination,
+    randomization=randomization.g1_29dof_wbt_robust_randomization,
+    command=command.g1_29dof_wbt_robust_command,
+)
+
 g1_29dof_wbt_w_object = replace(
     g1_29dof_wbt,
     command=command.g1_29dof_wbt_command_w_object,

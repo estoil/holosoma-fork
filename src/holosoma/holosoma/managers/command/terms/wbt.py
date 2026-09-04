@@ -1452,7 +1452,7 @@ class MotionCommand(CommandTermBase):
     ## Internal helpers
     #########################################################################################
     def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
-        """Shared path for optionally inserting default-pose interpolation before/after the clip."""
+        """Insert a default-pose transition and an optional stationary hold segment."""
         enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append
         if not enabled:
             return
@@ -1482,6 +1482,12 @@ class MotionCommand(CommandTermBase):
         try:
             self._add_transition_to_motion(default_state, num_steps, prepend=prepend)
             logger.info(log_str)
+            hold_duration = (
+                self.motion_cfg.default_pose_prepend_hold_duration_s
+                if prepend
+                else self.motion_cfg.default_pose_append_hold_duration_s
+            )
+            self._add_default_pose_hold(default_state, hold_duration, prepend=prepend)
         except Exception as exc:
             logger.error(f"Failed to {action} default pose transition: {exc}")
             raise RuntimeError(
@@ -1489,6 +1495,35 @@ class MotionCommand(CommandTermBase):
                 "This indicates a mismatch in tensor dimensions during interpolation. "
                 "Please check that the motion file and robot configuration are compatible."
             ) from exc
+
+    def _add_default_pose_hold(
+        self, default_state: dict[str, torch.Tensor], duration_s: float, *, prepend: bool
+    ) -> None:
+        """Add repeated, zero-velocity default-pose frames outside a transition.
+
+        The hold is inserted after building the transition.  For a prepend it is
+        placed before ``default -> motion``; for an append it is placed after
+        ``motion -> default``.
+        """
+        if duration_s <= 0.0:
+            return
+        num_steps = round(duration_s / self._env.dt)
+        if num_steps <= 0:
+            return
+
+        dtype = self.motion._joint_pos.dtype
+        state = self._default_motion_state(default_state, dtype=dtype, device=self.device)
+        segments = {
+            name: value.unsqueeze(0).repeat((num_steps,) + (1,) * value.ndim)
+            for name, value in state.items()
+        }
+        self._apply_transition_segments(segments, prepend=prepend)
+        logger.info(
+            "{} {} stationary default-pose frames ({}s)",
+            "prepend" if prepend else "append",
+            num_steps,
+            duration_s,
+        )
 
     def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
         """Build the state dict representing the robot's default standing pose.

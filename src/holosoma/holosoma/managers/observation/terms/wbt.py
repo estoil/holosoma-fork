@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from holosoma.managers.command.terms.wbt import MotionCommand
+from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
 from holosoma.utils.torch_utils import get_axis_params, to_torch
 
@@ -136,6 +137,60 @@ def dof_vel(env: WholeBodyTrackingManager) -> torch.Tensor:
         env._get_obs_dof_vel()
     """
     return env.simulator.dof_vel
+
+
+class RandomDelayedDofVelocity(ObservationTermBase):
+    """Joint velocity with a per-episode random one-control-step sensor delay.
+
+    The tensor shape is unchanged, so the exported policy keeps the same input
+    contract. Evaluation remains clean; delay is applied only while training.
+    """
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.delay_probability = float(cfg.params.get("delay_probability", 0.5))
+        if not 0.0 <= self.delay_probability <= 1.0:
+            raise ValueError("delay_probability must be in [0, 1]")
+        current = env.simulator.dof_vel
+        self._previous = current.clone()
+        self._cached = current.clone()
+        self._last_episode_step = torch.full(
+            (env.num_envs,), -1, dtype=torch.long, device=env.device
+        )
+        self._delayed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.reset()
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+        if env_ids.numel() == 0:
+            return
+        self._last_episode_step[env_ids] = -1
+        # ObservationManager.reset() runs before MotionCommand writes the new
+        # robot state. Defer history initialization until the first post-reset
+        # observation so no velocity leaks across episodes.
+        self._initialized[env_ids] = False
+        self._delayed[env_ids] = torch.rand(env_ids.numel(), device=self.env.device) < self.delay_probability
+
+    def __call__(self, env: WholeBodyTrackingManager, **_) -> torch.Tensor:
+        current = env.simulator.dof_vel
+        episode_step = env.episode_length_buf
+        changed = episode_step != self._last_episode_step
+        if torch.any(changed):
+            first = ~self._initialized[changed]
+            use_delay = (
+                self._delayed[changed]
+                & ~first
+                & (not getattr(env, "is_evaluating", False))
+            )
+            self._cached[changed] = torch.where(
+                use_delay.unsqueeze(-1), self._previous[changed], current[changed]
+            )
+            self._previous[changed] = current[changed]
+            self._last_episode_step[changed] = episode_step[changed]
+            self._initialized[changed] = True
+        return self._cached
 
 
 def actions(env: WholeBodyTrackingManager) -> torch.Tensor:

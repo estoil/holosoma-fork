@@ -49,3 +49,4 @@ src/holosoma/holosoma/data/motions/**/gmr_nokov/
 # Extra local artifacts
 .cursor/
 *.mp4
+*.zip

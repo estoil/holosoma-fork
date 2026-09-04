@@ -12,8 +12,7 @@ from holosoma.utils.simulator_config import SimulatorType
 # --- IMU-centric OU orientation noise (HuB, arXiv:2505.07294) --------------------------------------
 # 训练时给 base 姿态注入"时间相关(OU/AR1)+ 耦合"的估计误差,弥补现有 per-term 独立白噪的两个盲点:
 # 白噪可被策略滤掉、且各通道独立;真机 IMU 误差却时间相关、且让 projected_gravity/base_ang_vel 一起偏。
-# 仅训练用(eval/部署时置零,保持干净对比);叠加在现有 per-term noise 之上。想关掉设 IMU_OU_ENABLED=False。
-IMU_OU_ENABLED = False  # 回退续训 DR:从零先练干净单脚能力,OU 关(之后 fine-tune 再加),2026-07-13
+# 仅训练用(eval/部署时置零,保持干净对比);只有 robust actor 选择 *_ou 观测项时才启用。
 IMU_OU_THETA = 0.1     # AR(1) 回归系数(越小=相关时间越长;0.1 ≈ 0.2s@50Hz)
 IMU_OU_SIGMA = 0.012   # 每步噪声标度 → 稳态 std ≈ 0.012/sqrt(2*0.1) ≈ 0.027 rad ≈ 1.5°(想更狠调大)
 
@@ -34,6 +33,11 @@ class WholeBodyTrackingManager(BaseTask):
         self._init_domain_rand_buffers()
         # IMU-centric OU orientation-error buffer (roll/pitch/yaw), advanced once per step (training only).
         self._imu_ou_euler = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+        self._imu_ou_enabled = any(
+            term.func.endswith((":base_ang_vel_ou", ":projected_gravity_ou"))
+            for group in self.observation_manager.cfg.groups.values()
+            for term in group.terms.values()
+        )
 
     def _configure_default_dof_pos(self):
         self.default_dof_pos_base = torch.zeros(
@@ -53,7 +57,7 @@ class WholeBodyTrackingManager(BaseTask):
         self.base_quat[:] = self.simulator.base_quat[:]
         # IMU-centric OU orientation noise: advance AR(1) in training, zero during eval (clean measurement).
         if hasattr(self, "_imu_ou_euler"):
-            if IMU_OU_ENABLED and not self.is_evaluating:
+            if self._imu_ou_enabled and not self.is_evaluating:
                 self._imu_ou_euler.mul_(1.0 - IMU_OU_THETA).add_(IMU_OU_SIGMA * torch.randn_like(self._imu_ou_euler))
             else:
                 self._imu_ou_euler.zero_()

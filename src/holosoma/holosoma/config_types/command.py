@@ -128,6 +128,9 @@ class MotionConfig:
     """Duration in seconds of the pre-appended interpolation phase.
     Only used if enable_default_pose_prepend is True."""
 
+    default_pose_prepend_hold_duration_s: float = 0.0
+    """Duration of the stationary default-pose hold before the prepend transition."""
+
     enable_default_pose_append: bool = False
     """If True, post-append interpolated frames from the motion's last pose back to default pose.
     This provides a smooth return trajectory that the policy can track."""
@@ -135,6 +138,9 @@ class MotionConfig:
     default_pose_append_duration_s: float = 2.0
     """Duration in seconds of the post-appended interpolation phase.
     Only used if enable_default_pose_append is True."""
+
+    default_pose_append_hold_duration_s: float = 0.0
+    """Duration of the stationary default-pose hold after the append transition."""
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)

@@ -8,6 +8,7 @@ from holosoma.config_values.loco.x2.experiment import x2_31dof, x2_31dof_fast_sa
 from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt,
     g1_29dof_wbt_fast_sac,
+    g1_29dof_wbt_fast_sac_robust,
     g1_29dof_wbt_fast_sac_w_object,
     g1_29dof_wbt_w_object,
 )
@@ -23,6 +24,7 @@ DEFAULTS = {
     "g1_29dof_wbt": g1_29dof_wbt,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_w_object,
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac,
+    "g1_29dof_wbt_fast_sac_robust": g1_29dof_wbt_fast_sac_robust,
     "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
     "x2_31dof_wbt": x2_31dof_wbt,
     "x2_31dof_wbt_fast_sac": x2_31dof_wbt_fast_sac,

@@ -1,5 +1,7 @@
 """Whole Body Tracking randomization presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 
 robot_state_dr_at_setup = {
@@ -152,4 +154,34 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object"]
+# Moderate impulses preserve learnability while still forcing recovery. Sensor
+# latency/noise is handled by the actor observation preset, separately from this
+# physical domain randomization.
+robust_setup_terms = base_setup_terms.copy()
+robust_setup_terms["push_randomizer_state"] = replace(
+    base_setup_terms["push_randomizer_state"],
+    params={
+        "push_interval_s": [3.0, 6.0],
+        "max_push_vel": [0.15, 0.15, 0.05, 0.20, 0.20, 0.25],
+        "enabled": True,
+    },
+)
+robust_setup_terms["actuator_randomizer_state"] = replace(
+    base_setup_terms["actuator_randomizer_state"],
+    params={
+        **base_setup_terms["actuator_randomizer_state"].params,
+        "enable_pd_gain": True,
+    },
+)
+
+g1_29dof_wbt_robust_randomization = RandomizationManagerCfg(
+    setup_terms=robust_setup_terms,
+    reset_terms={**base_reset_terms},
+    step_terms={**base_step_terms},
+)
+
+__all__ = [
+    "g1_29dof_wbt_randomization",
+    "g1_29dof_wbt_randomization_w_object",
+    "g1_29dof_wbt_robust_randomization",
+]
