@@ -71,6 +71,44 @@ def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.
     return torch.sum(out_of_limits, dim=1)
 
 
+def action_target_soft_limit(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.85) -> torch.Tensor:
+    """Penalize commanded position targets before they approach hard joint limits."""
+    action_scales = torch.as_tensor(env.action_scales, device=env.device).reshape(1, -1)
+    target = env.default_dof_pos + env.action_manager.action * action_scales
+    hard = env.simulator.hard_dof_pos_limits  # type: ignore[attr-defined]
+    midpoint = (hard[:, 0] + hard[:, 1]) * 0.5
+    radius = (hard[:, 1] - hard[:, 0]) * 0.5 * soft_dof_pos_limit
+    violation = torch.relu((target - midpoint).abs() - radius)
+    return torch.sum(torch.square(violation), dim=1)
+
+
+def normalized_torque_usage(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Mean squared actuator effort normalized by each joint's torque limit."""
+    values = []
+    limits = env.torque_limits.clamp_min(1e-6)
+    for _, term in env.action_manager.iter_terms():
+        torques = getattr(term, "torques", None)
+        if torques is not None:
+            values.append(torch.mean(torch.square(torques / limits), dim=1))
+    return torch.stack(values).mean(dim=0) if values else torch.zeros(env.num_envs, device=env.device)
+
+
+def quiet_double_support_velocity(
+    env: WholeBodyTrackingManager,
+    support_threshold: float = 0.95,
+    reference_velocity_threshold: float = 0.05,
+    joint_velocity_scale: float = 0.1,
+) -> torch.Tensor:
+    """Penalize residual motion only in stationary, reference double-support frames."""
+    command = _get_motion_command_and_assert_type(env)
+    quiet_reference = torch.max(torch.abs(command.joint_vel), dim=1).values < reference_velocity_threshold
+    double_support = torch.all(command.reference_support_phase > support_threshold, dim=1)
+    active = (quiet_reference & double_support).to(env.simulator.dof_vel.dtype)
+    base_ang = torch.sum(torch.square(getattr(env, "base_ang_vel", env.simulator.robot_root_states[:, 10:13])), dim=1)
+    joint_vel = torch.mean(torch.square(env.simulator.dof_vel), dim=1)
+    return active * (base_ang + joint_velocity_scale * joint_vel)
+
+
 #########################################################################################################
 ## terms specific to Whole Body Tracking
 #########################################################################################################

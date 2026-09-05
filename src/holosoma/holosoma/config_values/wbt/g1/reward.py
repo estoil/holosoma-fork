@@ -8,6 +8,8 @@
 
 """Whole Body Tracking reward presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
 
 g1_29dof_wbt_reward = RewardManagerCfg(
@@ -183,6 +185,26 @@ g1_29dof_wbt_fast_sac_reward = RewardManagerCfg(
     }
 )
 
+g1_29dof_wbt_fast_sac_robust_reward = replace(
+    g1_29dof_wbt_fast_sac_reward,
+    terms={
+        **g1_29dof_wbt_fast_sac_reward.terms,
+        "quiet_double_support_velocity": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:quiet_double_support_velocity",
+            weight=-0.25,
+        ),
+        "action_target_soft_limit": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:action_target_soft_limit",
+            params={"soft_dof_pos_limit": 0.85},
+            weight=-2.0,
+        ),
+        "normalized_torque_usage": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:normalized_torque_usage",
+            weight=-0.02,
+        ),
+    },
+)
+
 g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward.terms,
@@ -200,4 +222,9 @@ g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_fast_sac_reward", "g1_29dof_wbt_reward", "g1_29dof_wbt_reward_w_object"]
+__all__ = [
+    "g1_29dof_wbt_fast_sac_reward",
+    "g1_29dof_wbt_fast_sac_robust_reward",
+    "g1_29dof_wbt_reward",
+    "g1_29dof_wbt_reward_w_object",
+]

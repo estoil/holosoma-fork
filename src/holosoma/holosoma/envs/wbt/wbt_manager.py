@@ -31,6 +31,9 @@ class WholeBodyTrackingManager(BaseTask):
         self.need_to_refresh_envs = torch.ones(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         self._configure_default_dof_pos()
         self._init_domain_rand_buffers()
+        # Global policy-step counter used by the robust observation curriculum.
+        # Unlike episode_length_buf this is never reset when an environment falls.
+        self.common_step_counter = 0
         # IMU-centric OU orientation-error buffer (roll/pitch/yaw), advanced once per step (training only).
         self._imu_ou_euler = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self._imu_ou_enabled = any(
@@ -62,6 +65,9 @@ class WholeBodyTrackingManager(BaseTask):
             else:
                 self._imu_ou_euler.zero_()
 
+    def _update_counters_each_step(self):
+        self.common_step_counter += 1
+
     def _reset_buffers_callback(self, env_ids, target_buf=None):
         self.need_to_refresh_envs[env_ids] = True
         self.episode_length_buf[env_ids] = 0
@@ -87,6 +93,25 @@ class WholeBodyTrackingManager(BaseTask):
         if tracker is None:
             raise RuntimeError("AverageEpisodeLengthTracker is not registered with the curriculum manager.")
         return tracker
+
+    def get_checkpoint_state(self) -> dict[str, torch.Tensor | float]:
+        """Persist curricula so resumed robust runs do not restart at stage zero."""
+        return {
+            "average_episode_tracker": self._get_average_episode_tracker().state_dict(),
+            "common_step_counter": float(self.common_step_counter),
+        }
+
+    def load_checkpoint_state(self, state: dict[str, torch.Tensor | float] | None) -> None:
+        if not state:
+            return
+        tracker_state = state.get("average_episode_tracker")
+        if tracker_state is not None:
+            tracker = self._get_average_episode_tracker()
+            tracker.load_state_dict(tracker_state)
+            tracker.suppress_next_update()
+        counter = state.get("common_step_counter")
+        if counter is not None:
+            self.common_step_counter = int(counter.item() if isinstance(counter, torch.Tensor) else counter)
 
     # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
 

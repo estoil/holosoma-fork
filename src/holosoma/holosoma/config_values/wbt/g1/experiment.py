@@ -187,6 +187,7 @@ g1_29dof_wbt_fast_sac_robust = replace(
         ),
     ),
     observation=observation.g1_29dof_wbt_robust_observation,
+    reward=reward.g1_29dof_wbt_fast_sac_robust_reward,
     termination=termination.g1_29dof_wbt_robust_termination,
     randomization=randomization.g1_29dof_wbt_robust_randomization,
     command=command.g1_29dof_wbt_robust_command,

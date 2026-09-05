@@ -208,25 +208,44 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
 )
 
 robust_actor_terms = actor_obs_shared.terms.copy()
+_robust_sensor_curriculum = {
+    "stage_steps": [0, 80_000, 200_000],
+    "max_delay_ms": [2.0, 5.0, 8.0],
+    "dof_vel_noise": [0.02, 0.05, 0.10],
+    "jitter_ms": 1.0,
+    "stress_probability": 0.05,
+    "stress_delay_ms": 15.0,
+    "stress_dof_vel_noise": 0.20,
+}
 robust_actor_terms.update(
     {
-        # Coupled, temporally correlated orientation error is closer to a real
-        # estimator than independent white IMU noise.
+        # All deployable sensor-derived terms share one per-episode fractional
+        # delay.  Their dimensions and the 463-D ONNX contract stay unchanged.
         "base_ang_vel": replace(
             robust_actor_terms["base_ang_vel"],
-            func="holosoma.managers.observation.terms.wbt:base_ang_vel_ou",
+            func="holosoma.managers.observation.terms.wbt:RobustDelayedSensorObservation",
+            params={**_robust_sensor_curriculum, "source": "base_ang_vel", "resample_on_reset": True},
         ),
         "projected_gravity": replace(
             robust_actor_terms["projected_gravity"],
-            func="holosoma.managers.observation.terms.wbt:projected_gravity_ou",
+            func="holosoma.managers.observation.terms.wbt:RobustDelayedSensorObservation",
+            params={"source": "projected_gravity"},
         ),
-        # Match the MuJoCo noisy evaluation: ±0.20 rad/s plus a randomized
-        # one-control-step delay, without changing the ONNX observation size.
+        "dof_pos": replace(
+            robust_actor_terms["dof_pos"],
+            func="holosoma.managers.observation.terms.wbt:RobustDelayedSensorObservation",
+            params={"source": "dof_pos"},
+        ),
         "dof_vel": replace(
             robust_actor_terms["dof_vel"],
-            func="holosoma.managers.observation.terms.wbt:RandomDelayedDofVelocity",
-            params={"delay_probability": 0.5},
-            noise=0.20,
+            func="holosoma.managers.observation.terms.wbt:RobustDelayedSensorObservation",
+            params={"source": "dof_vel"},
+            noise=0.0,
+        ),
+        "whole_body_com_rel_support_center": replace(
+            robust_actor_terms["whole_body_com_rel_support_center"],
+            func="holosoma.managers.observation.terms.wbt:RobustDelayedSensorObservation",
+            params={"source": "whole_body_com_rel_support_center"},
         ),
     }
 )

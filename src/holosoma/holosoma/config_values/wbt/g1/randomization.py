@@ -158,6 +158,16 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
 # latency/noise is handled by the actor observation preset, separately from this
 # physical domain randomization.
 robust_setup_terms = base_setup_terms.copy()
+robust_setup_terms["randomize_robot_rigid_body_material_startup"] = replace(
+    base_setup_terms["randomize_robot_rigid_body_material_startup"],
+    params={
+        # Broad enough for floor variation but avoids highly elastic contacts
+        # that are not representative of rubber feet on an indoor floor.
+        "static_friction_range": [0.5, 1.3],
+        "dynamic_friction_range": [0.4, 1.1],
+        "restitution_range": [0.0, 0.1],
+    },
+)
 robust_setup_terms["push_randomizer_state"] = replace(
     base_setup_terms["push_randomizer_state"],
     params={

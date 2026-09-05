@@ -51,7 +51,7 @@ robust_motion_config = replace(
     use_adaptive_timesteps_sampler=True,
     # Half of resets exercise the complete stand -> motion -> stand sequence;
     # the remainder focus on failure-heavy phases through adaptive RSI.
-    start_at_timestep_zero_prob=0.5,
+    start_at_timestep_zero_prob=0.6,
     freeze_at_timestep_zero_prob=0.0,
     enable_default_pose_prepend=True,
     default_pose_prepend_hold_duration_s=2.0,

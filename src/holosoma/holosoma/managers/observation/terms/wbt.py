@@ -193,6 +193,149 @@ class RandomDelayedDofVelocity(ObservationTermBase):
         return self._cached
 
 
+class _SharedRobustSensorState:
+    """Per-environment delay/noise curriculum shared by deployable sensor terms.
+
+    IsaacSim exposes WBT observations at the 50 Hz policy boundary.  Fractional
+    delays are therefore represented by interpolating the current and previous
+    policy-boundary samples.  This keeps all sensor-derived actor terms on one
+    timestamp and preserves their exported dimensions.
+    """
+
+    def __init__(self, env: WholeBodyTrackingManager, params: dict):
+        self.env = env
+        self.stage_steps = tuple(int(v) for v in params.get("stage_steps", (0, 80_000, 200_000)))
+        self.max_delay_ms = tuple(float(v) for v in params.get("max_delay_ms", (2.0, 5.0, 8.0)))
+        self.dof_vel_noise = tuple(float(v) for v in params.get("dof_vel_noise", (0.02, 0.05, 0.10)))
+        if not (len(self.stage_steps) == len(self.max_delay_ms) == len(self.dof_vel_noise)):
+            raise ValueError("robust sensor curriculum lists must have identical lengths")
+        if not self.stage_steps or self.stage_steps[0] != 0 or tuple(sorted(self.stage_steps)) != self.stage_steps:
+            raise ValueError("stage_steps must be sorted and start at zero")
+        self.stress_probability = float(params.get("stress_probability", 0.05))
+        self.stress_delay_ms = float(params.get("stress_delay_ms", 15.0))
+        self.stress_dof_vel_noise = float(params.get("stress_dof_vel_noise", 0.20))
+        self.jitter_ms = float(params.get("jitter_ms", 1.0))
+        self.control_period_ms = float(env.dt) * 1000.0
+        self.delay_ms = torch.zeros(env.num_envs, device=env.device)
+        self.noise_scale = torch.zeros(env.num_envs, device=env.device)
+        self._step_delay_fraction = torch.zeros(env.num_envs, device=env.device)
+        self._last_step = -1
+
+    def _stage(self) -> int:
+        step = int(getattr(self.env, "common_step_counter", 0))
+        stage = 0
+        for index, start in enumerate(self.stage_steps):
+            if step >= start:
+                stage = index
+        return stage
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        stage = self._stage()
+        count = env_ids.numel()
+        delay = torch.rand(count, device=self.env.device) * self.max_delay_ms[stage]
+        noise = torch.full((count,), self.dof_vel_noise[stage], device=self.env.device)
+        stress = torch.rand(count, device=self.env.device) < self.stress_probability
+        if torch.any(stress):
+            delay[stress] = self.max_delay_ms[stage] + torch.rand(
+                int(stress.sum().item()), device=self.env.device
+            ) * max(0.0, self.stress_delay_ms - self.max_delay_ms[stage])
+            noise[stress] = self.stress_dof_vel_noise
+        self.delay_ms[env_ids] = delay
+        self.noise_scale[env_ids] = noise
+
+    def delay_fraction(self) -> torch.Tensor:
+        if getattr(self.env, "is_evaluating", False):
+            return torch.zeros_like(self._step_delay_fraction)
+        step = int(getattr(self.env, "common_step_counter", 0))
+        if step != self._last_step:
+            jitter = (torch.rand_like(self.delay_ms) * 2.0 - 1.0) * self.jitter_ms
+            effective_ms = (self.delay_ms + jitter).clamp(min=0.0, max=self.control_period_ms)
+            self._step_delay_fraction.copy_(effective_ms / self.control_period_ms)
+            self._last_step = step
+        return self._step_delay_fraction
+
+
+class RobustDelayedSensorObservation(ObservationTermBase):
+    """Synchronously delay sensor-derived observations without changing their shape."""
+
+    _VALID_SOURCES = {
+        "base_ang_vel",
+        "dof_pos",
+        "dof_vel",
+        "projected_gravity",
+        "whole_body_com_rel_support_center",
+    }
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.source = str(cfg.params.get("source"))
+        if self.source not in self._VALID_SOURCES:
+            raise ValueError(f"unsupported robust sensor source: {self.source}")
+        state = getattr(env, "_robust_sensor_state", None)
+        if state is None:
+            state = _SharedRobustSensorState(env, cfg.params)
+            env._robust_sensor_state = state
+        self.state = state
+        self.resample_on_reset = bool(cfg.params.get("resample_on_reset", False))
+        self._previous: torch.Tensor | None = None
+        self._cached: torch.Tensor | None = None
+        self._bias: torch.Tensor | None = None
+        self._initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._last_episode_step = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
+
+    def _current(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        if self.source == "base_ang_vel":
+            return base_ang_vel_ou(env)
+        if self.source == "dof_pos":
+            return dof_pos(env)
+        if self.source == "dof_vel":
+            return dof_vel(env)
+        if self.source == "projected_gravity":
+            return projected_gravity_ou(env)
+        return whole_body_com_rel_support_center(env)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+        if env_ids.numel() == 0:
+            return
+        if self.resample_on_reset:
+            self.state.reset(env_ids)
+        self._initialized[env_ids] = False
+        self._last_episode_step[env_ids] = -1
+        if self._bias is not None:
+            scale = self.state.noise_scale[env_ids].unsqueeze(-1) * 0.25
+            self._bias[env_ids] = (torch.rand_like(self._bias[env_ids]) * 2.0 - 1.0) * scale
+
+    def __call__(self, env: WholeBodyTrackingManager, **_) -> torch.Tensor:
+        current = self._current(env)
+        if self._previous is None:
+            self._previous = current.clone()
+            self._cached = current.clone()
+            self._bias = torch.zeros_like(current)
+            if self.source == "dof_vel" and not getattr(env, "is_evaluating", False):
+                scale = self.state.noise_scale.unsqueeze(-1) * 0.25
+                self._bias.copy_((torch.rand_like(self._bias) * 2.0 - 1.0) * scale)
+        assert self._cached is not None and self._bias is not None
+        changed = env.episode_length_buf != self._last_episode_step
+        if torch.any(changed):
+            first = ~self._initialized[changed]
+            alpha = self.state.delay_fraction()[changed].unsqueeze(-1)
+            delayed = current[changed] * (1.0 - alpha) + self._previous[changed] * alpha
+            delayed = torch.where(first.unsqueeze(-1), current[changed], delayed)
+            if self.source == "dof_vel" and not getattr(env, "is_evaluating", False):
+                scale = self.state.noise_scale[changed].unsqueeze(-1)
+                white = (torch.rand_like(delayed) * 2.0 - 1.0) * scale
+                delayed = delayed + white + self._bias[changed]
+            self._cached[changed] = delayed
+            self._previous[changed] = current[changed]
+            self._initialized[changed] = True
+            self._last_episode_step[changed] = env.episode_length_buf[changed]
+        return self._cached
+
+
 def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Last actions taken by the policy.
 
